@@ -10,11 +10,10 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                let mut buf = [0; 128];
-                stream.read(&mut buf).unwrap();
-                let request = str::from_utf8(&buf).unwrap();
-                for _ in 0..request.matches("PING").count() {
-                    stream.write_all(b"+PONG\r\n").unwrap();
+                let mut buf = [0; 512];
+                loop {
+                    let _ = stream.read(&mut buf).unwrap();
+                    stream.write(b"+PONG\r\n").unwrap();
                 }
             }
             Err(e) => {
