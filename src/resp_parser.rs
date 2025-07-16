@@ -535,7 +535,8 @@ impl RespType {
                 // work
                 format!("*{:?}\r\n{:?}", len, elements).into_bytes()
             }
-            RespType::Null() => b"_\r\n".into(),
+            // this is just a hack because the platform uses RESP2 in RESP3 it should be "_\r\n"
+            RespType::Null() => b"$-1\r\n".into(),
             RespType::Boolean(b) => format!("#{}\r\n", if *b { "t" } else { "f" }).into_bytes(),
             RespType::Doubles(d) => format!(",{}\r\n", d).into_bytes(),
             RespType::BigNumbers(n) => format!("({}\r\n", n).into_bytes(),

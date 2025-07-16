@@ -5,6 +5,7 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
     thread,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 mod resp_commands;
@@ -13,12 +14,32 @@ mod resp_parser;
 use resp_commands::RedisCommands;
 use resp_parser::{parse, RespType};
 
-pub type SharedCache = Arc<Mutex<HashMap<String, String>>>;
+#[derive(Debug, Clone)]
+pub struct CacheEntry {
+    pub value: String,
+    pub expires_at: Option<u64>, // Unix timestamp in milliseconds
+}
+
+impl CacheEntry {
+    pub fn is_expired(&self) -> bool {
+        if let Some(expiry) = self.expires_at {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            now > expiry
+        } else {
+            false
+        }
+    }
+}
+
+pub type SharedCache = Arc<Mutex<HashMap<String, CacheEntry>>>;
 
 fn handle_client(mut stream: TcpStream, cache: SharedCache) {
     let mut buffer = [0; 512];
     loop {
-        let bytes_read = match stream.read(&mut buffer) {
+        let _ = match stream.read(&mut buffer) {
             Ok(0) => return, // connection closed
             Ok(n) => n,
             Err(_) => return, // error occurred
@@ -27,13 +48,8 @@ fn handle_client(mut stream: TcpStream, cache: SharedCache) {
         let parsed_resp = parse(&buffer).unwrap();
         let response = RedisCommands::from(parsed_resp.0).execute(cache.clone());
 
-        // Hardcode PONG response for now
+        // write respose back to the client
         stream.write(&response).unwrap();
-
-        // Echo the message back
-        // if let Err(_) = stream.write_all(&buffer[..bytes_read]) {
-        //     return; // writing failed
-        // }
     }
 }
 
