@@ -5,17 +5,26 @@ use std::{
     thread,
 };
 
+mod resp_commands;
+mod resp_parser;
+
+use resp_commands::RespCommands;
+use resp_parser::parse;
+
 fn handle_client(mut stream: TcpStream) {
     let mut buffer = [0; 512];
     loop {
-        let _bytes_read = match stream.read(&mut buffer) {
+        let bytes_read = match stream.read(&mut buffer) {
             Ok(0) => return, // connection closed
             Ok(n) => n,
             Err(_) => return, // error occurred
         };
 
+        let parsed_resp = parse(&buffer).unwrap();
+        let response = RespCommands::from(parsed_resp.0).execute();
+
         // Hardcode PONG response for now
-        stream.write(b"+PONG\r\n").unwrap();
+        stream.write(&response).unwrap();
 
         // Echo the message back
         // if let Err(_) = stream.write_all(&buffer[..bytes_read]) {
