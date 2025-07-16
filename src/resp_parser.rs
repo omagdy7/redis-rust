@@ -495,7 +495,7 @@ fn parse_pushes() {
     todo!()
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RespType {
     SimpleString(String),              // +
     SimpleError(String),               // -
@@ -512,6 +512,53 @@ pub enum RespType {
     Attributes(Vec<RespType>),         // |
     Sets(HashSet<RespType>),           // ~
     Pushes(Vec<RespType>),             // >
+}
+
+impl RespType {
+    pub fn to_resp_bytes(&self) -> Vec<u8> {
+        match self {
+            RespType::SimpleString(s) => format!("+{}\r\n", s).into_bytes(),
+            RespType::SimpleError(s) => format!("-{}\r\n", s).into_bytes(),
+            RespType::Integer(i) => format!(":{}\r\n", i).into_bytes(),
+            RespType::BulkString(bytes) => {
+                let len = bytes.len();
+                let s = String::from_utf8_lossy(bytes);
+                format!("${}\r\n{}\r\n", len, s).into_bytes()
+            }
+            RespType::Array(arr) => {
+                let len = arr.len();
+                let elements = arr
+                    .iter()
+                    .map(|e| e.to_resp_bytes())
+                    .collect::<Vec<Vec<u8>>>();
+                // TODO: Implement proper Display for elements because this will definitely not
+                // work
+                format!("*{:?}\r\n{:?}", len, elements).into_bytes()
+            }
+            RespType::Null() => b"_\r\n".into(),
+            RespType::Boolean(b) => format!("#{}\r\n", if *b { "t" } else { "f" }).into_bytes(),
+            RespType::Doubles(d) => format!(",{}\r\n", d).into_bytes(),
+            RespType::BigNumbers(n) => format!("({}\r\n", n).into_bytes(),
+            RespType::BulkErrors(errors) => {
+                todo!()
+            }
+            RespType::VerbatimStrings(strings) => {
+                todo!()
+            }
+            RespType::Maps(map) => {
+                todo!()
+            }
+            RespType::Attributes(attrs) => {
+                todo!()
+            }
+            RespType::Sets(set) => {
+                todo!()
+            }
+            RespType::Pushes(pushes) => {
+                todo!()
+            }
+        }
+    }
 }
 
 impl PartialEq for RespType {
