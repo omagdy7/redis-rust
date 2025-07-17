@@ -8,6 +8,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[macro_use]
+mod macros;
 mod resp_commands;
 mod resp_parser;
 
