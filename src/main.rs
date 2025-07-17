@@ -5,7 +5,7 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 mod resp_commands;
@@ -36,8 +36,27 @@ impl CacheEntry {
 
 pub type SharedCache = Arc<Mutex<HashMap<String, CacheEntry>>>;
 
+fn spawn_cleanup_thread(cache: SharedCache) {
+    let cache_clone = cache.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(10)); // Check every 10 seconds
+
+            let mut cache = cache_clone.lock().unwrap();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+
+            // Remove expired keys
+            cache.retain(|_, entry| entry.expires_at.map_or(true, |expiry| now <= expiry));
+        }
+    });
+}
+
 fn handle_client(mut stream: TcpStream, cache: SharedCache) {
     let mut buffer = [0; 512];
+
     loop {
         let _ = match stream.read(&mut buffer) {
             Ok(0) => return, // connection closed
@@ -56,6 +75,8 @@ fn handle_client(mut stream: TcpStream, cache: SharedCache) {
 fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
     let cache: SharedCache = Arc::new(Mutex::new(HashMap::new()));
+
+    spawn_cleanup_thread(cache.clone());
 
     for stream in listener.incoming() {
         match stream {
