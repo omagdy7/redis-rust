@@ -92,7 +92,8 @@ macro_rules! resp {
     };
 }
 
-enum SetCondition {
+#[derive(Debug, Clone)]
+pub enum SetCondition {
     /// NX - only set if key doesn't exists
     NotExists,
     /// XX - only set if key already exists
@@ -129,7 +130,7 @@ pub enum ExpiryOption {
 /// XX -- Only set the key if it already exists.
 /// KEEPTTL -- Retain the time to live associated with the key.
 /// GET -- Return the old string stored at key, or nil if key did not exist. An error is returned and SET aborted if the value stored at key is not a string.
-
+#[derive(Debug, Clone)]
 pub struct SetCommand {
     key: String,
     value: String,
@@ -189,6 +190,19 @@ impl SetCommand {
     }
 }
 
+// Helper function to extract string from BulkString
+fn extract_string(resp: &RespType) -> Option<String> {
+    match resp {
+        RespType::BulkString(bytes) => str::from_utf8(bytes).ok().map(|s| s.to_owned()),
+        _ => None,
+    }
+}
+
+// Helper function to parse u64 from BulkString
+fn parse_u64(resp: &RespType) -> Option<u64> {
+    extract_string(resp)?.parse().ok()
+}
+
 pub enum RedisCommands {
     PING,
     ECHO(String),
@@ -210,7 +224,7 @@ impl RedisCommands {
                             cache.remove(&key); // Clean up expired key
                             resp!(null)
                         } else {
-                            resp!(entry.value)
+                            resp!(bulk entry.value)
                         }
                     }
                     None => resp!(null),
@@ -232,12 +246,16 @@ impl RedisCommands {
                     _ => {} // No condition or condition met
                 }
 
+                let mut get_value: Option<String> = None;
+
                 // Handle GET option
-                let old_value = if command.get_old_value {
-                    cache.get(&command.key).map(|e| e.value.clone())
+                if command.get_old_value {
+                    match cache.get(&command.key) {
+                        Some(val) => get_value = Some(val.value.clone()),
+                        None => {}
+                    }
                 } else {
-                    None
-                };
+                }
 
                 // Calculate expiry
                 let expires_at = if let Some(ExpiryOption::KeepTtl) = command.expiry {
@@ -256,9 +274,13 @@ impl RedisCommands {
                     },
                 );
 
-                match old_value {
-                    Some(val) => resp!(val),
-                    None => resp!("OK"),
+                if !command.get_old_value {
+                    return resp!("OK");
+                }
+
+                match get_value {
+                    Some(val) => return resp!(bulk val),
+                    None => return resp!(null),
                 }
             }
             RedisCommands::Invalid => todo!(),
@@ -266,182 +288,157 @@ impl RedisCommands {
     }
 }
 
+// Parser for SET command options
+struct SetOptionParser {
+    command: SetCommand,
+}
+
+impl SetOptionParser {
+    fn new(key: String, value: String) -> Self {
+        Self {
+            command: SetCommand::new(key, value),
+        }
+    }
+
+    fn parse_option(&mut self, option: &str, next_arg: Option<&str>) -> Result<bool, &'static str> {
+        match option.to_ascii_uppercase().as_str() {
+            "GET" => {
+                self.command = self.command.clone().with_get(true);
+                Ok(false) // doesn't consume next argument
+            }
+            "NX" => {
+                self.command = self
+                    .command
+                    .clone()
+                    .with_condition(Some(SetCondition::NotExists));
+                Ok(false)
+            }
+            "XX" => {
+                self.command = self
+                    .command
+                    .clone()
+                    .with_condition(Some(SetCondition::Exists));
+                Ok(false)
+            }
+            "KEEPTTL" => {
+                self.command = self
+                    .command
+                    .clone()
+                    .with_expiry(Some(ExpiryOption::KeepTtl));
+                Ok(false)
+            }
+            "EX" => {
+                let seconds = next_arg
+                    .ok_or("EX requires a value")?
+                    .parse::<u64>()
+                    .map_err(|_| "Invalid EX value")?;
+                self.command = self
+                    .command
+                    .clone()
+                    .with_expiry(Some(ExpiryOption::Seconds(seconds)));
+                Ok(true) // consumes next argument
+            }
+            "PX" => {
+                let ms = next_arg
+                    .ok_or("PX requires a value")?
+                    .parse::<u64>()
+                    .map_err(|_| "Invalid PX value")?;
+                self.command = self
+                    .command
+                    .clone()
+                    .with_expiry(Some(ExpiryOption::Milliseconds(ms)));
+                Ok(true)
+            }
+            "EXAT" => {
+                let timestamp = next_arg
+                    .ok_or("EXAT requires a value")?
+                    .parse::<u64>()
+                    .map_err(|_| "Invalid EXAT value")?;
+                self.command = self
+                    .command
+                    .clone()
+                    .with_expiry(Some(ExpiryOption::ExpiresAtSeconds(timestamp)));
+                Ok(true)
+            }
+            "PXAT" => {
+                let timestamp = next_arg
+                    .ok_or("PXAT requires a value")?
+                    .parse::<u64>()
+                    .map_err(|_| "Invalid PXAT value")?;
+                self.command = self
+                    .command
+                    .clone()
+                    .with_expiry(Some(ExpiryOption::ExpiresAtMilliseconds(timestamp)));
+                Ok(true)
+            }
+            _ => Err("Unknown SET option"),
+        }
+    }
+
+    fn parse_options(mut self, options: &[String]) -> Result<SetCommand, &'static str> {
+        let mut i = 0;
+        while i < options.len() {
+            let option = &options[i];
+            let next_arg = options.get(i + 1).map(|s| s.as_str());
+
+            let consumes_next = self.parse_option(option, next_arg)?;
+            i += if consumes_next { 2 } else { 1 };
+        }
+        Ok(self.command)
+    }
+}
+
 impl From<RespType> for RedisCommands {
     fn from(value: RespType) -> Self {
-        match value {
-            RespType::Array(command) => {
-                let length = command.len();
-                match length {
-                    // Probably PING
-                    1 => {
-                        if let RespType::BulkString(command_name) = command[0].clone() {
-                            if command_name.to_ascii_uppercase() == b"PING" {
-                                return Self::PING;
-                            } else {
-                                // TODO: Handle the case where it's another command with
-                                // insufficient arugments
-                                return Self::Invalid;
-                            }
-                        }
-                        return Self::Invalid;
-                    }
-                    // Probably GET or ECHO
-                    2 => {
-                        if let (RespType::BulkString(command_name), RespType::BulkString(key)) =
-                            (command[0].clone(), command[1].clone())
-                        {
-                            if command_name.to_ascii_uppercase() == b"GET" {
-                                return Self::GET(str::from_utf8(&key).unwrap().to_owned());
-                            } else if command_name.to_ascii_uppercase() == b"ECHO" {
-                                return Self::ECHO(str::from_utf8(&key).unwrap().to_owned());
-                            } else {
-                                // TODO: Handle the case where it's another command with
-                                // insufficient arugments
-                                return Self::Invalid;
-                            }
-                        }
-                        return Self::Invalid;
-                    }
-                    // Probably SET wit key and value
-                    3 => {
-                        if let (
-                            RespType::BulkString(command_name),
-                            RespType::BulkString(key),
-                            RespType::BulkString(value),
-                        ) = (command[0].clone(), command[1].clone(), command[2].clone())
-                        {
-                            if command_name.to_ascii_uppercase() == b"SET" {
-                                let set_command = SetCommand::new(
-                                    str::from_utf8(&key).unwrap().to_owned(),
-                                    str::from_utf8(&value).unwrap().to_owned(),
-                                );
-                                return Self::SET(set_command);
-                            } else {
-                                // TODO: Handle the case where it's another command with
-                                // insufficient arugments
-                                return Self::Invalid;
-                            }
-                        }
-                        return Self::Invalid;
-                    }
-                    // Probably SET wit key and value and [NX | XX] [GET] [EX seconds | PX milliseconds]
-                    4 => {
-                        if let (
-                            RespType::BulkString(command_name),
-                            RespType::BulkString(key),
-                            RespType::BulkString(value),
-                            RespType::BulkString(option_1),
-                        ) = (
-                            command[0].clone(),
-                            command[1].clone(),
-                            command[2].clone(),
-                            command[3].clone(),
-                        ) {
-                            if command_name.to_ascii_uppercase() == b"SET" {
-                                let mut get_old_value = false;
-                                let mut set_condition: Option<SetCondition> = None;
-                                let mut expiry_option: Option<ExpiryOption> = None;
-                                match option_1.to_ascii_uppercase().as_slice() {
-                                    b"GET" => get_old_value = true,
-                                    b"NX" => set_condition = Some(SetCondition::NotExists),
-                                    b"XX" => set_condition = Some(SetCondition::Exists),
-                                    b"KEEPTTL" => expiry_option = Some(ExpiryOption::KeepTtl),
-                                    _ => unreachable!("If I am here the user provided a non existing command and I should probably make this into an error but I am lazy")
-                                }
-                                let set_command = SetCommand::new(
-                                    str::from_utf8(&key).unwrap().to_owned(),
-                                    str::from_utf8(&value).unwrap().to_owned(),
-                                )
-                                .with_get(get_old_value)
-                                .with_condition(set_condition)
-                                .with_expiry(expiry_option);
-                                return Self::SET(set_command);
-                            } else {
-                                // TODO: Handle the case where it's another command with
-                                // insufficient arugments
-                                return Self::Invalid;
-                            }
-                        }
-                        return Self::Invalid;
-                    }
-                    // Probably SET wit key and value and [NX | XX] and possibly [GET]
-                    5 => {
-                        if let (
-                            RespType::BulkString(command_name),
-                            RespType::BulkString(key),
-                            RespType::BulkString(value),
-                            RespType::BulkString(option_1),
-                            RespType::BulkString(option_2),
-                        ) = (
-                            command[0].clone(),
-                            command[1].clone(),
-                            command[2].clone(),
-                            command[3].clone(),
-                            command[4].clone(),
-                        ) {
-                            if command_name == b"SET" {
-                                let mut get_old_value = false;
-                                let mut set_condition: Option<SetCondition> = None;
-                                let mut expiry_option: Option<ExpiryOption> = None;
-                                let option_2_clone = option_2.clone();
-                                match option_1.to_ascii_uppercase().as_slice() {
-                                    b"NX" => set_condition = Some(SetCondition::NotExists),
-                                    b"XX" => set_condition = Some(SetCondition::Exists),
-                                    b"GET" => get_old_value = true,
-                                    b"EX" => expiry_option = Some(ExpiryOption::Seconds(str::from_utf8(&option_2_clone).unwrap().parse::<u64>().unwrap())),
-                                    b"PX" => expiry_option = Some(ExpiryOption::Milliseconds(str::from_utf8(&option_2_clone).unwrap().parse::<u64>().unwrap())),
-                                    b"EXAT" => expiry_option = Some(ExpiryOption::ExpiresAtSeconds(str::from_utf8(&option_2_clone).unwrap().parse::<u64>().unwrap())),
-                                    b"PXAT" => expiry_option = Some(ExpiryOption::ExpiresAtSeconds(str::from_utf8(&option_2_clone).unwrap().parse::<u64>().unwrap())),
-                                    b"KEEPTTL" => expiry_option = Some(ExpiryOption::KeepTtl),
-                                    _ => unreachable!("If I am here the user provided a non existing command and I should probably make this into an error but I am lazy") // TODO: Implement that
-                                }
+        // Alternative approach using a more functional style with iterators
+        let RespType::Array(command) = value else {
+            return Self::Invalid;
+        };
 
-                                if set_condition.is_some() {
-                                    match option_2.to_ascii_uppercase().as_slice() {
-                                        b"GET" => get_old_value = true,
-                                        b"KEEPTTL" => expiry_option = Some(ExpiryOption::KeepTtl),
-                                        _ => unreachable!("If I am here the user provided a non existing command and I should probably make this into an error but I am lazy")
-                                    }
-                                }
-                                if get_old_value == true {
-                                    match option_2.to_ascii_uppercase().as_slice() {
-                                        b"NX" => set_condition = Some(SetCondition::NotExists),
-                                        b"XX" => set_condition = Some(SetCondition::Exists),
-                                        b"KEEPTTL" => expiry_option = Some(ExpiryOption::KeepTtl),
-                                        _ => unreachable!("If I am here the user provided a non existing command and I should probably make this into an error but I am lazy")
-                                    }
-                                }
+        let mut args = command.iter().filter_map(extract_string);
 
-                                let set_command = SetCommand::new(
-                                    str::from_utf8(&key).unwrap().to_owned(),
-                                    str::from_utf8(&value).unwrap().to_owned(),
-                                )
-                                .with_get(get_old_value)
-                                .with_condition(set_condition)
-                                .with_expiry(expiry_option);
-                                return Self::SET(set_command);
-                            } else {
-                                // TODO: Handle the case where it's another command with
-                                // insufficient arugments
-                                return Self::Invalid;
-                            }
-                        }
-                        return Self::Invalid;
-                    }
-                    // Probably SET wit key and value and [NX | XX] and possibly [GET] and that
-                    // other plethora of expiry options
-                    6 => {
-                        todo!()
-                    }
-                    7 => {
-                        todo!()
-                    }
-                    _ => {
-                        todo!()
+        let Some(cmd_name) = args.next() else {
+            return Self::Invalid;
+        };
+
+        match cmd_name.to_ascii_uppercase().as_str() {
+            "PING" => {
+                if args.next().is_none() {
+                    Self::PING
+                } else {
+                    Self::Invalid
+                }
+            }
+            "ECHO" => match (args.next(), args.next()) {
+                (Some(echo_string), None) => Self::ECHO(echo_string),
+                _ => Self::Invalid,
+            },
+            "GET" => match (args.next(), args.next()) {
+                (Some(key), None) => Self::GET(key),
+                _ => Self::Invalid,
+            },
+            "SET" => {
+                let Some(key) = args.next() else {
+                    return Self::Invalid;
+                };
+                let Some(value) = args.next() else {
+                    return Self::Invalid;
+                };
+
+                let options: Vec<String> = args.collect();
+
+                if options.is_empty() {
+                    Self::SET(SetCommand::new(key, value))
+                } else {
+                    let parser = SetOptionParser::new(key, value);
+                    match parser.parse_options(&options) {
+                        Ok(set_command) => Self::SET(set_command),
+                        Err(_) => Self::Invalid,
                     }
                 }
             }
-            _ => todo!(),
+            _ => Self::Invalid,
         }
     }
 }
+
