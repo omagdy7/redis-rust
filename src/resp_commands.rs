@@ -1,6 +1,6 @@
 use crate::{resp_parser::*, shared_cache::*};
-use std::collections::HashMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use crate::{Config, SharedConfig};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 pub enum SetCondition {
@@ -118,11 +118,12 @@ pub enum RedisCommands {
     ECHO(String),
     GET(String),
     SET(SetCommand),
+    CONFIG_GET(String),
     Invalid,
 }
 
 impl RedisCommands {
-    pub fn execute(self, cache: SharedCache) -> Vec<u8> {
+    pub fn execute(self, cache: SharedCache, config: SharedConfig) -> Vec<u8> {
         match self {
             RedisCommands::PING => resp!("PONG"),
             RedisCommands::ECHO(echo_string) => resp!(echo_string),
@@ -191,6 +192,29 @@ impl RedisCommands {
                 match get_value {
                     Some(val) => return resp!(bulk val),
                     None => return resp!(null),
+                }
+            }
+            RedisCommands::CONFIG_GET(s) => {
+                use RespType as RT;
+                let config = config.clone();
+                if let Some(conf) = config.as_ref() {
+                    let dir = conf.dir.clone().unwrap();
+                    let dbfilename = conf.dbfilename.clone().unwrap();
+                    match s.as_str() {
+                        "dir" => RT::Array(vec![
+                            RT::BulkString(s.as_bytes().to_vec()),
+                            RT::BulkString(dir.as_bytes().to_vec()),
+                        ])
+                        .to_resp_bytes(),
+                        "dbfilename" => RT::Array(vec![
+                            RT::BulkString(s.as_bytes().to_vec()),
+                            RT::BulkString(dbfilename.as_bytes().to_vec()),
+                        ])
+                        .to_resp_bytes(),
+                        _ => unreachable!(),
+                    }
+                } else {
+                    unreachable!()
                 }
             }
             RedisCommands::Invalid => todo!(),
@@ -346,6 +370,18 @@ impl From<RespType> for RedisCommands {
                         Err(_) => Self::Invalid,
                     }
                 }
+            }
+            "CONFIG" => {
+                let Some(sub_command) = args.next() else {
+                    return Self::Invalid;
+                };
+                let Some(key) = args.next() else {
+                    return Self::Invalid;
+                };
+                if &sub_command.to_uppercase() == &"GET" {
+                    return Self::CONFIG_GET(key);
+                }
+                Self::Invalid
             }
             _ => Self::Invalid,
         }

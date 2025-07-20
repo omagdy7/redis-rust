@@ -587,11 +587,11 @@ impl RespType {
                 let len = arr.len();
                 let elements = arr
                     .iter()
-                    .map(|e| e.to_resp_bytes())
-                    .collect::<Vec<Vec<u8>>>();
+                    .flat_map(|e| String::from_utf8(e.to_resp_bytes()))
+                    .collect::<String>();
                 // TODO: Implement proper Display for elements because this will definitely not
                 // work
-                format!("*{:?}\r\n{:?}", len, elements).into_bytes()
+                format!("*{}\r\n{}", len, elements).into_bytes()
             }
             // this is just a hack because the platform uses RESP2 in RESP3 it should be "_\r\n"
             RespType::Null() => b"$-1\r\n".into(),
