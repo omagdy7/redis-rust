@@ -1,4 +1,3 @@
-#[macro_use]
 #[macro_export]
 macro_rules! resp {
     // Null: resp!(null)
@@ -30,6 +29,7 @@ macro_rules! resp {
     };
 
     // Array: resp!(array [resp!("one"), resp!(int 2)])
+    // FIXME: this doesn't work and errors
     (array [$($elem:expr),*]) => {
         RespType::Array(vec![$($elem),*]).to_resp_bytes()
     };

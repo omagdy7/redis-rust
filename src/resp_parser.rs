@@ -7,6 +7,10 @@ use std::{
     isize,
 };
 
+//  TODO: [ ] Refactor this mess and find a better way to merge the RespType and RedisValue type??
+//  TODO: [ ] Find a better way to convert from RespType to bytes and vice versa
+//  TODO: [ ] Refactor the use of Vec<u8> to the bytes crate
+
 pub const SIMPLE_STRING: u8 = b'+';
 pub const SIMPLE_ERROR: u8 = b'-';
 pub const INTEGER: u8 = b':';

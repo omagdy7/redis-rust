@@ -1,4 +1,3 @@
-use crate::rdb::RDBFile;
 use crate::SharedConfig;
 use crate::{resp_parser::*, shared_cache::*};
 use regex::Regex;
@@ -117,6 +116,7 @@ pub enum RedisCommands {
     Set(SetCommand),
     ConfigGet(String),
     Keys(String),
+    Info(String),
     Invalid,
 }
 
@@ -233,6 +233,10 @@ impl RedisCommands {
                     })
                     .collect();
                 RT::Array(matching_keys).to_resp_bytes()
+            }
+            RC::Info(_sub_command) => {
+                use RespType as RT;
+                RT::BulkString("# Replication\r\nrole:master".as_bytes().to_vec()).to_resp_bytes()
             }
             RC::Invalid => todo!(),
         }
@@ -406,10 +410,16 @@ impl From<RespType> for RedisCommands {
                 }
                 Self::Invalid
             }
+            "INFO" => {
+                let Some(sub_command) = args.next() else {
+                    return Self::Invalid;
+                };
+                if &sub_command.to_uppercase() == &"REPLICATION" {
+                    return Self::Info(sub_command);
+                }
+                Self::Invalid
+            }
             _ => Self::Invalid,
         }
     }
 }
-
-#[cfg(test)]
-mod tests {}
