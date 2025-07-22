@@ -697,6 +697,7 @@ fn test_rdb_file() {
     ];
 
     let result = RDBFile::from_bytes(&input);
+    dbg!(&result);
     assert!(result.is_ok());
 
     let (rdb, _) = result.unwrap();

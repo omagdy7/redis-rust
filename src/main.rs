@@ -1,4 +1,5 @@
 #![allow(unused_imports)]
+use core::time;
 use std::{
     collections::HashMap,
     env,
@@ -9,7 +10,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use codecrafters_redis::shared_cache::*;
+use codecrafters_redis::{
+    rdb::{KeyExpiry, ParseError, RDBFile, RedisValue},
+    shared_cache::*,
+};
 use codecrafters_redis::{resp_commands::RedisCommands, Config};
 use codecrafters_redis::{
     resp_parser::{parse, RespType},
@@ -62,6 +66,30 @@ fn main() -> std::io::Result<()> {
     match Config::new() {
         Ok(conf) => {
             if let Some(conf) = conf {
+                let mut cache = cache.lock().unwrap();
+
+                let dir = conf.dir.clone().unwrap();
+                let dbfilename = conf.dbfilename.clone().unwrap();
+                if let Some(rdb_file) = RDBFile::read(dir, dbfilename).unwrap() {
+                    let hash_table = &rdb_file.databases.get(&0).unwrap().hash_table;
+
+                    for (key, db_entry) in hash_table.iter() {
+                        let value = match &db_entry.value {
+                            RedisValue::String(data) => String::from_utf8(data.clone()).unwrap(),
+                            RedisValue::Integer(data) => data.to_string(),
+                            _ => {
+                                unreachable!()
+                            }
+                        };
+                        let expires_at = if let Some(key_expiry) = &db_entry.expiry {
+                            Some(key_expiry.timestamp)
+                        } else {
+                            None
+                        };
+                        let cache_entry = CacheEntry { value, expires_at };
+                        cache.insert(String::from_utf8(key.clone()).unwrap(), cache_entry);
+                    }
+                }
                 config = Arc::new(Some(conf));
             }
         }

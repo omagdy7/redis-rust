@@ -128,6 +128,7 @@ impl RedisCommands {
             RC::Echo(echo_string) => resp!(echo_string),
             RC::Get(key) => {
                 let mut cache = cache.lock().unwrap();
+
                 match cache.get(&key).cloned() {
                     Some(entry) => {
                         if entry.is_expired() {
@@ -223,35 +224,15 @@ impl RedisCommands {
 
                 let cache = cache.lock().unwrap();
                 let regex = Regex::new(&query).unwrap();
-                let config = config.clone();
-
-                if let Some(conf) = config.as_ref() {
-                    let dir = conf.dir.clone().unwrap();
-                    let dbfilename = conf.dbfilename.clone().unwrap();
-                    let rdb_file = RDBFile::read(dir, dbfilename).unwrap();
-
-                    let hash_table = &rdb_file.databases.get(&0).unwrap().hash_table;
-                    let matching_keys: Vec<RT> = hash_table
-                        .keys()
-                        .map(|key| str::from_utf8(key).unwrap())
-                        .filter_map(|key| {
-                            regex
-                                .is_match(key)
-                                .then(|| RT::BulkString(key.as_bytes().to_vec()))
-                        })
-                        .collect();
-                    RT::Array(matching_keys).to_resp_bytes()
-                } else {
-                    let matching_keys: Vec<RT> = cache
-                        .keys()
-                        .filter_map(|key| {
-                            regex
-                                .is_match(key)
-                                .then(|| RT::BulkString(key.as_bytes().to_vec()))
-                        })
-                        .collect();
-                    RT::Array(matching_keys).to_resp_bytes()
-                }
+                let matching_keys: Vec<RT> = cache
+                    .keys()
+                    .filter_map(|key| {
+                        regex
+                            .is_match(key)
+                            .then(|| RT::BulkString(key.as_bytes().to_vec()))
+                    })
+                    .collect();
+                RT::Array(matching_keys).to_resp_bytes()
             }
             RC::Invalid => todo!(),
         }

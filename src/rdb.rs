@@ -4,7 +4,8 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs, io, isize,
+    fs::{self, File},
+    io, isize,
     path::Path,
 };
 
@@ -187,16 +188,19 @@ impl TryFrom<u8> for ValueType {
     }
 }
 
+#[derive(Debug)]
 pub struct KeyExpiry {
     pub timestamp: u64,
     pub unit: ExpiryUnit,
 }
 
+#[derive(Debug)]
 pub enum ExpiryUnit {
     Seconds,
     Milliseconds,
 }
 
+#[derive(Debug)]
 pub struct DatabaseEntry {
     pub expiry: Option<KeyExpiry>,
     pub value_type: ValueType,
@@ -394,6 +398,7 @@ pub struct HashTableSizeInfo {
 
 pub type DatabaseIndex = usize;
 
+#[derive(Debug)]
 pub struct RDBDatabase {
     pub database_index: DatabaseIndex,
     pub size_hints: HashTableSizeInfo,
@@ -423,11 +428,12 @@ fn parse_db_key_value(
         value: value,
     };
 
-    let key_data = if let RedisValue::String(data) = key {
-        data
-    } else {
-        return Err(ParseError::UnexpectedEof);
+    let key_data = match key {
+        RedisValue::String(data) => data,
+        RedisValue::Integer(data) => data.to_string().as_bytes().to_vec(),
+        _ => return Err(ParseError::InvalidMetadata),
     };
+
     hash_table.insert(key_data, database_entry);
 
     Ok(())
@@ -580,6 +586,7 @@ impl FromBytes for RDBDatabase {
     }
 }
 
+#[derive(Debug)]
 pub struct RDBFile {
     pub header: RDBHeader,
     pub metadata: Option<RDBMetaData>,
@@ -649,17 +656,23 @@ impl FromBytes for RDBFile {
 }
 
 impl RDBFile {
-    pub fn read(dir: String, dbfilename: String) -> Result<Self, anyhow::Error> {
+    pub fn read(dir: String, dbfilename: String) -> Result<Option<Self>, anyhow::Error> {
         let dir = Path::new(&dir);
         let file_path = dir.join(dbfilename);
 
         // Read file to bytes
-        let bytes = fs::read(&file_path)?;
-        let (rdb_file, consumed) = RDBFile::from_bytes(&bytes)?;
+        if file_path.exists() {
+            let bytes = fs::read(&file_path)?;
+            let (rdb_file, consumed) = RDBFile::from_bytes(&bytes)?;
 
-        // sanity check
-        assert!(bytes.len() == consumed);
-        Ok(rdb_file)
+            // sanity check
+            assert!(bytes.len() == consumed);
+
+            Ok(Some(rdb_file))
+        } else {
+            File::create(file_path)?;
+            Ok(None)
+        }
     }
 }
 
