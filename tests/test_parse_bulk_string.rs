@@ -30,7 +30,7 @@ fn test_valid_bulk_strings() {
     // large string
     let large_content = "x".repeat(1000);
     let large_bulk = format!("$1000\r\n{}\r\n", large_content);
-    if let RespType::BulkString(bulk) = parse_bulk_strings(large_bulk.as_bytes()).unwrap().0 {}
+    if let RespType::BulkString(_) = parse_bulk_strings(large_bulk.as_bytes()).unwrap().0 {}
 
     assert_eq!(
         parse_bulk_strings(large_bulk.as_bytes()).unwrap().0,

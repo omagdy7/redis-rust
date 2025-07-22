@@ -37,13 +37,13 @@ mod command_parser_tests {
     #[test]
     fn test_parse_ping() {
         let cmd = build_command_from_str_slice(&["PING"]);
-        assert!(matches!(RedisCommands::from(cmd), RedisCommands::PING));
+        assert!(matches!(RedisCommands::from(cmd), RedisCommands::Ping));
     }
 
     #[test]
     fn test_parse_ping_case_insensitive() {
         let cmd = build_command_from_str_slice(&["pInG"]);
-        assert!(matches!(RedisCommands::from(cmd), RedisCommands::PING));
+        assert!(matches!(RedisCommands::from(cmd), RedisCommands::Ping));
     }
 
     #[test]
@@ -56,7 +56,7 @@ mod command_parser_tests {
     fn test_parse_echo() {
         let cmd = build_command_from_str_slice(&["ECHO", "hello world"]);
         match RedisCommands::from(cmd) {
-            RedisCommands::ECHO(s) => assert_eq!(s, "hello world"),
+            RedisCommands::Echo(s) => assert_eq!(s, "hello world"),
             _ => panic!("Expected ECHO command"),
         }
     }
@@ -71,7 +71,7 @@ mod command_parser_tests {
     fn test_parse_get() {
         let cmd = build_command_from_str_slice(&["GET", "mykey"]);
         match RedisCommands::from(cmd) {
-            RedisCommands::GET(k) => assert_eq!(k, "mykey"),
+            RedisCommands::Get(k) => assert_eq!(k, "mykey"),
             _ => panic!("Expected GET command"),
         }
     }
@@ -80,7 +80,7 @@ mod command_parser_tests {
     fn test_parse_simple_set() {
         let cmd = build_command_from_str_slice(&["SET", "mykey", "myvalue"]);
         match RedisCommands::from(cmd) {
-            RedisCommands::SET(c) => {
+            RedisCommands::Set(c) => {
                 assert_eq!(c.key, "mykey");
                 assert_eq!(c.value, "myvalue");
                 assert!(c.condition.is_none() && c.expiry.is_none() && !c.get_old_value);
@@ -93,7 +93,7 @@ mod command_parser_tests {
     fn test_parse_set_with_all_options() {
         let cmd = build_command_from_str_slice(&["SET", "k", "v", "NX", "PX", "5000", "GET"]);
         match RedisCommands::from(cmd) {
-            RedisCommands::SET(c) => {
+            RedisCommands::Set(c) => {
                 assert!(matches!(c.condition, Some(SetCondition::NotExists)));
                 assert!(matches!(c.expiry, Some(ExpiryOption::Milliseconds(5000))));
                 assert!(c.get_old_value);
@@ -106,7 +106,7 @@ mod command_parser_tests {
     fn test_parse_set_options_case_insensitive() {
         let cmd = build_command_from_str_slice(&["set", "k", "v", "nx", "px", "100"]);
         match RedisCommands::from(cmd) {
-            RedisCommands::SET(c) => {
+            RedisCommands::Set(c) => {
                 assert!(matches!(c.condition, Some(SetCondition::NotExists)));
                 assert!(matches!(c.expiry, Some(ExpiryOption::Milliseconds(100))));
             }
@@ -266,8 +266,6 @@ mod set_command_tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use codecrafters_redis::resp_commands::{ExpiryOption, SetCommand};
-
-    use super::*;
 
     #[test]
     fn test_calculate_expiry_seconds() {

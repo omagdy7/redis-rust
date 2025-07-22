@@ -55,16 +55,17 @@ fn handle_client(mut stream: TcpStream, cache: SharedCache, config: SharedConfig
 fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
     let cache: SharedCache = Arc::new(Mutex::new(HashMap::new()));
-    let mut config: SharedConfig = None.into();
+    let mut config: SharedConfig = Arc::new(None);
 
     spawn_cleanup_thread(cache.clone());
 
     match Config::new() {
         Ok(conf) => {
-            config = Arc::new(Some((conf)));
+            if let Some(conf) = conf {
+                config = Arc::new(Some(conf));
+            }
         }
         Err(e) => {
-            config = Arc::new(None);
             eprintln!("Error: {}", e);
             std::process::exit(1);
         }

@@ -1,5 +1,7 @@
+use crate::rdb::RDBFile;
+use crate::SharedConfig;
 use crate::{resp_parser::*, shared_cache::*};
-use crate::{Config, SharedConfig};
+use regex::Regex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
@@ -108,26 +110,23 @@ fn extract_string(resp: &RespType) -> Option<String> {
     }
 }
 
-// Helper function to parse u64 from BulkString
-fn parse_u64(resp: &RespType) -> Option<u64> {
-    extract_string(resp)?.parse().ok()
-}
-
 pub enum RedisCommands {
-    PING,
-    ECHO(String),
-    GET(String),
-    SET(SetCommand),
-    CONFIG_GET(String),
+    Ping,
+    Echo(String),
+    Get(String),
+    Set(SetCommand),
+    ConfigGet(String),
+    Keys(String),
     Invalid,
 }
 
 impl RedisCommands {
     pub fn execute(self, cache: SharedCache, config: SharedConfig) -> Vec<u8> {
+        use RedisCommands as RC;
         match self {
-            RedisCommands::PING => resp!("PONG"),
-            RedisCommands::ECHO(echo_string) => resp!(echo_string),
-            RedisCommands::GET(key) => {
+            RC::Ping => resp!("PONG"),
+            RC::Echo(echo_string) => resp!(echo_string),
+            RC::Get(key) => {
                 let mut cache = cache.lock().unwrap();
                 match cache.get(&key).cloned() {
                     Some(entry) => {
@@ -141,7 +140,7 @@ impl RedisCommands {
                     None => resp!(null),
                 }
             }
-            RedisCommands::SET(command) => {
+            RC::Set(command) => {
                 let mut cache = cache.lock().unwrap();
 
                 // Check conditions (NX/XX)
@@ -194,7 +193,7 @@ impl RedisCommands {
                     None => return resp!(null),
                 }
             }
-            RedisCommands::CONFIG_GET(s) => {
+            RC::ConfigGet(s) => {
                 use RespType as RT;
                 let config = config.clone();
                 if let Some(conf) = config.as_ref() {
@@ -217,7 +216,44 @@ impl RedisCommands {
                     unreachable!()
                 }
             }
-            RedisCommands::Invalid => todo!(),
+            RC::Keys(query) => {
+                use RespType as RT;
+
+                let query = query.replace('*', ".*");
+
+                let cache = cache.lock().unwrap();
+                let regex = Regex::new(&query).unwrap();
+                let config = config.clone();
+
+                if let Some(conf) = config.as_ref() {
+                    let dir = conf.dir.clone().unwrap();
+                    let dbfilename = conf.dbfilename.clone().unwrap();
+                    let rdb_file = RDBFile::read(dir, dbfilename).unwrap();
+
+                    let hash_table = &rdb_file.databases.get(&0).unwrap().hash_table;
+                    let matching_keys: Vec<RT> = hash_table
+                        .keys()
+                        .map(|key| str::from_utf8(key).unwrap())
+                        .filter_map(|key| {
+                            regex
+                                .is_match(key)
+                                .then(|| RT::BulkString(key.as_bytes().to_vec()))
+                        })
+                        .collect();
+                    RT::Array(matching_keys).to_resp_bytes()
+                } else {
+                    let matching_keys: Vec<RT> = cache
+                        .keys()
+                        .filter_map(|key| {
+                            regex
+                                .is_match(key)
+                                .then(|| RT::BulkString(key.as_bytes().to_vec()))
+                        })
+                        .collect();
+                    RT::Array(matching_keys).to_resp_bytes()
+                }
+            }
+            RC::Invalid => todo!(),
         }
     }
 }
@@ -338,17 +374,17 @@ impl From<RespType> for RedisCommands {
         match cmd_name.to_ascii_uppercase().as_str() {
             "PING" => {
                 if args.next().is_none() {
-                    Self::PING
+                    Self::Ping
                 } else {
                     Self::Invalid
                 }
             }
             "ECHO" => match (args.next(), args.next()) {
-                (Some(echo_string), None) => Self::ECHO(echo_string),
+                (Some(echo_string), None) => Self::Echo(echo_string),
                 _ => Self::Invalid,
             },
             "GET" => match (args.next(), args.next()) {
-                (Some(key), None) => Self::GET(key),
+                (Some(key), None) => Self::Get(key),
                 _ => Self::Invalid,
             },
             "SET" => {
@@ -362,14 +398,20 @@ impl From<RespType> for RedisCommands {
                 let options: Vec<String> = args.collect();
 
                 if options.is_empty() {
-                    Self::SET(SetCommand::new(key, value))
+                    Self::Set(SetCommand::new(key, value))
                 } else {
                     let parser = SetOptionParser::new(key, value);
                     match parser.parse_options(&options) {
-                        Ok(set_command) => Self::SET(set_command),
+                        Ok(set_command) => Self::Set(set_command),
                         Err(_) => Self::Invalid,
                     }
                 }
+            }
+            "KEYS" => {
+                let Some(query) = args.next() else {
+                    return Self::Invalid;
+                };
+                Self::Keys(query)
             }
             "CONFIG" => {
                 let Some(sub_command) = args.next() else {
@@ -379,7 +421,7 @@ impl From<RespType> for RedisCommands {
                     return Self::Invalid;
                 };
                 if &sub_command.to_uppercase() == &"GET" {
-                    return Self::CONFIG_GET(key);
+                    return Self::ConfigGet(key);
                 }
                 Self::Invalid
             }

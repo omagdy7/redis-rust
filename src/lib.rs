@@ -2,6 +2,7 @@ use std::{env, sync::Arc};
 
 #[macro_use]
 pub mod macros;
+pub mod rdb;
 pub mod resp_commands;
 pub mod resp_parser;
 pub mod shared_cache;
@@ -15,8 +16,12 @@ pub struct Config {
 pub type SharedConfig = Arc<Option<Config>>;
 
 impl Config {
-    pub fn new() -> Result<Config, String> {
+    pub fn new() -> Result<Option<Config>, String> {
         let args: Vec<String> = env::args().collect();
+
+        if args.len() == 1 {
+            return Ok(None);
+        }
 
         let mut dir = None;
         let mut dbfilename = None;
@@ -44,6 +49,6 @@ impl Config {
             }
         }
 
-        Ok(Config { dir, dbfilename })
+        Ok(Some(Config { dir, dbfilename }))
     }
 }
