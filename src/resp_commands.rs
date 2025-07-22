@@ -1,5 +1,5 @@
-use crate::SharedConfig;
 use crate::{resp_parser::*, shared_cache::*};
+use crate::{RedisServer, SharedConfig};
 use regex::Regex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -237,11 +237,18 @@ impl RedisCommands {
             RC::Info(_sub_command) => {
                 use RespType as RT;
                 let config = config.clone();
-                let mut role = "master".to_string();
+                let mut server = RedisServer::new();
                 if let Some(conf) = config.as_ref() {
-                    role = conf.server.clone().role;
+                    server = conf.server.clone();
                 }
-                let response = format!("# Replication\r\nrole:{role}",).as_bytes().to_vec();
+                let response = format!(
+                    "# Replication\r\nrole:{}master_replid:{}master_repl_offset:{}",
+                    server.role,
+                    server.master_replid.unwrap_or("".to_string()),
+                    server.master_repl_offset.unwrap_or("".to_string())
+                )
+                .as_bytes()
+                .to_vec();
                 RT::BulkString(response).to_resp_bytes()
             }
             RC::Invalid => todo!(),

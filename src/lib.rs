@@ -7,12 +7,16 @@ pub mod resp_commands;
 pub mod resp_parser;
 pub mod shared_cache;
 
+// TODO: Model this in a better way there could be an enum where a Slave Server is distinguised
+// from master servers in 2 different structs
 #[derive(Debug, Clone, Default)]
 pub struct RedisServer {
     pub role: String,
     pub port: String,
     pub master_host: String,
     pub master_port: String,
+    pub master_replid: Option<String>,
+    pub master_repl_offset: Option<String>,
 }
 
 impl RedisServer {
@@ -22,6 +26,9 @@ impl RedisServer {
             port: "6379".to_string(),
             master_host: "".to_string(),
             master_port: "".to_string(),
+            // HACK: Hardcoded for now
+            master_replid: Some("8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".to_string()),
+            master_repl_offset: Some("0".to_string()),
         }
     }
 }
@@ -86,6 +93,11 @@ impl Config {
                         .unwrap_or(("", ""));
 
                     redis_server.role = "slave".to_string();
+
+                    // slaves don't have master attributes!!
+                    redis_server.master_replid = None;
+                    redis_server.master_repl_offset = None;
+
                     redis_server.master_host = master_host.to_string();
                     redis_server.master_port = master_port.to_string();
                     i += 2;
