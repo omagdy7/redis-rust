@@ -57,37 +57,39 @@ fn handle_client(mut stream: TcpStream, cache: SharedCache, config: SharedConfig
 }
 
 fn main() -> std::io::Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:6379").unwrap();
     let cache: SharedCache = Arc::new(Mutex::new(HashMap::new()));
     let mut config: SharedConfig = Arc::new(None);
-
-    spawn_cleanup_thread(cache.clone());
+    let mut port = "6379".to_string();
 
     match Config::new() {
         Ok(conf) => {
             if let Some(conf) = conf {
                 let mut cache = cache.lock().unwrap();
+                let dir = conf.dir.clone().unwrap_or("".to_string());
+                let dbfilename = conf.dbfilename.clone().unwrap_or("".to_string());
+                port = conf.port.clone().unwrap_or("6379".to_string());
+                if let Ok(rdb_file) = RDBFile::read(dir, dbfilename) {
+                    if let Some(rdb) = rdb_file {
+                        let hash_table = &rdb.databases.get(&0).unwrap().hash_table;
 
-                let dir = conf.dir.clone().unwrap();
-                let dbfilename = conf.dbfilename.clone().unwrap();
-                if let Some(rdb_file) = RDBFile::read(dir, dbfilename).unwrap() {
-                    let hash_table = &rdb_file.databases.get(&0).unwrap().hash_table;
-
-                    for (key, db_entry) in hash_table.iter() {
-                        let value = match &db_entry.value {
-                            RedisValue::String(data) => String::from_utf8(data.clone()).unwrap(),
-                            RedisValue::Integer(data) => data.to_string(),
-                            _ => {
-                                unreachable!()
-                            }
-                        };
-                        let expires_at = if let Some(key_expiry) = &db_entry.expiry {
-                            Some(key_expiry.timestamp)
-                        } else {
-                            None
-                        };
-                        let cache_entry = CacheEntry { value, expires_at };
-                        cache.insert(String::from_utf8(key.clone()).unwrap(), cache_entry);
+                        for (key, db_entry) in hash_table.iter() {
+                            let value = match &db_entry.value {
+                                RedisValue::String(data) => {
+                                    String::from_utf8(data.clone()).unwrap()
+                                }
+                                RedisValue::Integer(data) => data.to_string(),
+                                _ => {
+                                    unreachable!()
+                                }
+                            };
+                            let expires_at = if let Some(key_expiry) = &db_entry.expiry {
+                                Some(key_expiry.timestamp)
+                            } else {
+                                None
+                            };
+                            let cache_entry = CacheEntry { value, expires_at };
+                            cache.insert(String::from_utf8(key.clone()).unwrap(), cache_entry);
+                        }
                     }
                 }
                 config = Arc::new(Some(conf));
@@ -98,6 +100,10 @@ fn main() -> std::io::Result<()> {
             std::process::exit(1);
         }
     }
+
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).unwrap();
+
+    spawn_cleanup_thread(cache.clone());
 
     for stream in listener.incoming() {
         match stream {

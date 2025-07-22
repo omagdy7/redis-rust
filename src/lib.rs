@@ -11,6 +11,7 @@ pub mod shared_cache;
 pub struct Config {
     pub dir: Option<String>,
     pub dbfilename: Option<String>,
+    pub port: Option<String>,
 }
 
 pub type SharedConfig = Arc<Option<Config>>;
@@ -25,6 +26,7 @@ impl Config {
 
         let mut dir = None;
         let mut dbfilename = None;
+        let mut port = None;
 
         let mut i = 1; // Skip program name
         while i < args.len() {
@@ -43,12 +45,23 @@ impl Config {
                     dbfilename = Some(args[i + 1].clone());
                     i += 2;
                 }
+                "--port" => {
+                    if i + 1 >= args.len() {
+                        return Err("--dbfilename requires a value".to_string());
+                    }
+                    port = Some(args[i + 1].clone());
+                    i += 2;
+                }
                 _ => {
                     return Err(format!("Unknown argument: {}", args[i]));
                 }
             }
         }
 
-        Ok(Some(Config { dir, dbfilename }))
+        Ok(Some(Config {
+            dir,
+            dbfilename,
+            port,
+        }))
     }
 }
