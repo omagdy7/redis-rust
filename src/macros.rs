@@ -1,5 +1,5 @@
 #[macro_export]
-macro_rules! resp {
+macro_rules! resp_bytes {
     // Null: resp!(null)
     (null) => {
         RespType::Null().to_resp_bytes()
@@ -28,9 +28,9 @@ macro_rules! resp {
         RespType::BulkString($s.into()).to_resp_bytes()
     };
 
-    // Array: resp!(array [resp!("one"), resp!(int 2)])
+    // Array: resp!(array => [resp!(bulk "one"), resp!(int 2)])
     // FIXME: this doesn't work and errors
-    (array [$($elem:expr),*]) => {
+    (array => [$($elem:expr),*]) => {
         RespType::Array(vec![$($elem),*]).to_resp_bytes()
     };
 
@@ -85,5 +85,94 @@ macro_rules! resp {
     // Push: resp!(push [resp!("event"), resp!("data")])
     (push [$($elem:expr),*]) => {
         RespType::Pushes(vec![$($elem),*]).to_resp_bytes()
+    };
+}
+
+macro_rules! resp {
+    // Null: resp!(null)
+    (null) => {
+        RespType::Null()
+    };
+
+    // Simple String: resp!("PONG") or resp!(simple "PONG")
+    (simple $s:expr) => {
+        RespType::SimpleString($s.to_string())
+    };
+    ($s:expr) => {
+        RespType::SimpleString($s.to_string())
+    };
+
+    // Simple Error: resp!(error "ERR message")
+    (error $s:expr) => {
+        RespType::SimpleError($s.to_string())
+    };
+
+    // Integer: resp!(int 123)
+    (int $i:expr) => {
+        RespType::Integer($i)
+    };
+
+    // Bulk String: resp!(bulk "hello") or resp!(bulk vec![104, 101, 108, 108, 111])
+    (bulk $s:expr) => {
+        RespType::BulkString($s.into())
+    };
+
+    // Array: resp!(array => [resp!(bulk "one"), resp!(int 2)])
+    // FIXME: this doesn't work and errors
+    (array => [$($elem:expr),*]) => {
+        RespType::Array(vec![$($elem),*])
+    };
+
+    // Boolean: resp!(bool true)
+    (bool $b:expr) => {
+        RespType::Boolean($b)
+    };
+
+    // Double: resp!(double 3.14)
+    (double $d:expr) => {
+        RespType::Doubles($d)
+    };
+
+    // Big Number: resp!(bignumber "123456789")
+    (bignumber $n:expr) => {
+        RespType::BigNumbers($n.to_string())
+    };
+
+    // Bulk Error: resp!(bulkerror [resp!("err1"), resp!("err2")])
+    (bulkerror [$($elem:expr),*]) => {
+        RespType::BulkErrors(vec![$($elem),*])
+    };
+
+    // Verbatim String: resp!(verbatim [resp!("txt"), resp!("example")])
+    (verbatim [$($elem:expr),*]) => {
+        RespType::VerbatimStrings(vec![$($elem),*])
+    };
+
+    // Map: resp!(map {resp!("key") => resp!("value")})
+    (map {$($key:expr => $value:expr),*}) => {
+        RespType::Maps({
+            let mut map = HashMap::new();
+            $(map.insert($key, $value);)*
+            map
+        })
+    };
+
+    // Attributes: resp!(attributes [resp!("key"), resp!("value")])
+    (attributes [$($elem:expr),*]) => {
+        RespType::Attributes(vec![$($elem),*])
+    };
+
+    // Set: resp!(set [resp!("one"), resp!("two")])
+    (set [$($elem:expr),*]) => {
+        RespType::Sets({
+            let mut set = HashSet::new();
+            $(set.insert($elem);)*
+            set
+        })
+    };
+
+    // Push: resp!(push [resp!("event"), resp!("data")])
+    (push [$($elem:expr),*]) => {
+        RespType::Pushes(vec![$($elem),*])
     };
 }

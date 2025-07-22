@@ -124,8 +124,8 @@ impl RedisCommands {
     pub fn execute(self, cache: SharedCache, config: SharedConfig) -> Vec<u8> {
         use RedisCommands as RC;
         match self {
-            RC::Ping => resp!("PONG"),
-            RC::Echo(echo_string) => resp!(echo_string),
+            RC::Ping => resp_bytes!("PONG"),
+            RC::Echo(echo_string) => resp_bytes!(echo_string),
             RC::Get(key) => {
                 let mut cache = cache.lock().unwrap();
 
@@ -133,12 +133,12 @@ impl RedisCommands {
                     Some(entry) => {
                         if entry.is_expired() {
                             cache.remove(&key); // Clean up expired key
-                            resp!(null)
+                            resp_bytes!(null)
                         } else {
-                            resp!(bulk entry.value)
+                            resp_bytes!(bulk entry.value)
                         }
                     }
-                    None => resp!(null),
+                    None => resp_bytes!(null),
                 }
             }
             RC::Set(command) => {
@@ -149,10 +149,10 @@ impl RedisCommands {
 
                 match command.condition {
                     Some(SetCondition::NotExists) if key_exists => {
-                        return resp!(null); // Key exists, NX failed
+                        return resp_bytes!(null); // Key exists, NX failed
                     }
                     Some(SetCondition::Exists) if !key_exists => {
-                        return resp!(null); // Key doesn't exist, XX failed
+                        return resp_bytes!(null); // Key doesn't exist, XX failed
                     }
                     _ => {} // No condition or condition met
                 }
@@ -186,12 +186,12 @@ impl RedisCommands {
                 );
 
                 if !command.get_old_value {
-                    return resp!("OK");
+                    return resp_bytes!("OK");
                 }
 
                 match get_value {
-                    Some(val) => return resp!(bulk val),
-                    None => return resp!(null),
+                    Some(val) => return resp_bytes!(bulk val),
+                    None => return resp_bytes!(null),
                 }
             }
             RC::ConfigGet(s) => {

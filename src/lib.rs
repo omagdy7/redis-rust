@@ -1,4 +1,9 @@
+use resp_parser::RespType;
 use std::{env, sync::Arc};
+use std::{
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+};
 
 #[macro_use]
 pub mod macros;
@@ -38,6 +43,25 @@ pub struct Config {
     pub dir: Option<String>,
     pub dbfilename: Option<String>,
     pub server: RedisServer,
+}
+
+fn handshake_process(slave: &RedisServer) -> Result<(), String> {
+    let master_address = format!("{}:{}", slave.master_host, slave.master_port);
+    // PING
+    match TcpStream::connect(master_address) {
+        Ok(mut stream) => {
+            if let Err(e) = stream.write_all(&resp_bytes!(array => [resp!(bulk "PING")])) {
+                return Err(format!("Failed to send: {}", e));
+            } else {
+                Ok(())
+            }
+        }
+        Err(e) => Err(format!("Master node doesn't exists: {}", e)),
+    }
+
+    // REPLCONF
+
+    // PSYNC
 }
 
 pub type SharedConfig = Arc<Option<Config>>;
@@ -86,11 +110,7 @@ impl Config {
                     // TODO: Find a better name for this variable
                     let info = args[i + 1].clone();
 
-                    let (master_host, master_port) = info
-                        .strip_prefix('"')
-                        .and_then(|x| x.strip_suffix('"'))
-                        .and_then(|x| x.split_once(' '))
-                        .unwrap_or(("", ""));
+                    let (master_host, master_port) = info.split_once(' ').unwrap();
 
                     redis_server.role = "slave".to_string();
 
@@ -100,6 +120,9 @@ impl Config {
 
                     redis_server.master_host = master_host.to_string();
                     redis_server.master_port = master_port.to_string();
+
+                    handshake_process(&redis_server)?;
+
                     i += 2;
                 }
                 _ => {
