@@ -236,7 +236,13 @@ impl RedisCommands {
             }
             RC::Info(_sub_command) => {
                 use RespType as RT;
-                RT::BulkString("# Replication\r\nrole:master".as_bytes().to_vec()).to_resp_bytes()
+                let config = config.clone();
+                let mut role = "master".to_string();
+                if let Some(conf) = config.as_ref() {
+                    role = conf.server.clone().role;
+                }
+                let response = format!("# Replication\r\nrole:{role}",).as_bytes().to_vec();
+                RT::BulkString(response).to_resp_bytes()
             }
             RC::Invalid => todo!(),
         }

@@ -67,7 +67,8 @@ fn main() -> std::io::Result<()> {
                 let mut cache = cache.lock().unwrap();
                 let dir = conf.dir.clone().unwrap_or("".to_string());
                 let dbfilename = conf.dbfilename.clone().unwrap_or("".to_string());
-                port = conf.port.clone().unwrap_or("6379".to_string());
+                let redis_server = conf.server.clone();
+                port = redis_server.port.clone();
                 if let Ok(rdb_file) = RDBFile::read(dir, dbfilename) {
                     if let Some(rdb) = rdb_file {
                         let hash_table = &rdb.databases.get(&0).unwrap().hash_table;

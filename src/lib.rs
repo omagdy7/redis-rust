@@ -7,11 +7,30 @@ pub mod resp_commands;
 pub mod resp_parser;
 pub mod shared_cache;
 
+#[derive(Debug, Clone, Default)]
+pub struct RedisServer {
+    pub role: String,
+    pub port: String,
+    pub master_host: String,
+    pub master_port: String,
+}
+
+impl RedisServer {
+    fn new() -> Self {
+        Self {
+            role: "master".to_string(),
+            port: "6379".to_string(),
+            master_host: "".to_string(),
+            master_port: "".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Config {
     pub dir: Option<String>,
     pub dbfilename: Option<String>,
-    pub port: Option<String>,
+    pub server: RedisServer,
 }
 
 pub type SharedConfig = Arc<Option<Config>>;
@@ -26,7 +45,7 @@ impl Config {
 
         let mut dir = None;
         let mut dbfilename = None;
-        let mut port = None;
+        let mut redis_server = RedisServer::new();
 
         let mut i = 1; // Skip program name
         while i < args.len() {
@@ -47,9 +66,28 @@ impl Config {
                 }
                 "--port" => {
                     if i + 1 >= args.len() {
-                        return Err("--dbfilename requires a value".to_string());
+                        return Err("--port requires a value".to_string());
                     }
-                    port = Some(args[i + 1].clone());
+                    redis_server.port = args[i + 1].clone();
+                    i += 2;
+                }
+                "--replicaof" => {
+                    if i + 1 >= args.len() {
+                        return Err("--replicaof requires a value".to_string());
+                    }
+
+                    // TODO: Find a better name for this variable
+                    let info = args[i + 1].clone();
+
+                    let (master_host, master_port) = info
+                        .strip_prefix('"')
+                        .and_then(|x| x.strip_suffix('"'))
+                        .and_then(|x| x.split_once(' '))
+                        .unwrap_or(("", ""));
+
+                    redis_server.role = "slave".to_string();
+                    redis_server.master_host = master_host.to_string();
+                    redis_server.master_port = master_port.to_string();
                     i += 2;
                 }
                 _ => {
@@ -61,7 +99,7 @@ impl Config {
         Ok(Some(Config {
             dir,
             dbfilename,
-            port,
+            server: redis_server,
         }))
     }
 }
