@@ -141,7 +141,8 @@ mod command_parser_tests {
 
 /// Tests for the command execution logic in `RedisCommands::execute`.
 mod command_execution_tests {
-    use codecrafters_redis::{resp_commands::RedisCommands, Config};
+    use codecrafters_redis::resp_commands::RedisCommands;
+    use codecrafters_redis::server::RedisServer;
     use std::time::Duration;
 
     use super::*;
@@ -149,8 +150,10 @@ mod command_execution_tests {
     /// Helper to parse and execute a command against a cache.
     fn run_command(cache: &SharedCache, args: &[&str]) -> Vec<u8> {
         let command = RedisCommands::from(build_command_from_str_slice(args));
-        let config = Arc::new(Some(Config::default()));
-        command.execute(Arc::clone(cache), config)
+        let mut server = RedisServer::master();
+        server.set_cache(cache);
+
+        command.execute(Arc::new(Mutex::new(server)))
     }
 
     #[test]
