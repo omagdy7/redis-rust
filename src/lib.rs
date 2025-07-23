@@ -79,6 +79,25 @@ fn handshake_process(slave: &RedisServer) -> Result<(), String> {
             if let Err(e) = stream.write_all(&resp_bytes!(array => [resp!(bulk "REPLCONF"), resp!(bulk "capa"), resp!(bulk "psync2")])) {
                 return Err(format!("Failed to send: {}", e));
             }
+
+            let _ = match stream.read(&mut buffer) {
+                Ok(0) => return Ok(()), // connection closed
+                Ok(n) => n,
+                Err(_) => return Ok(()), // error occurred
+            };
+
+            if let Err(e) = stream.write_all(
+                &resp_bytes!(array => [resp!(bulk "PSYNC"), resp!(bulk "?"), resp!(bulk "-1")]),
+            ) {
+                return Err(format!("Failed to send: {}", e));
+            }
+
+            let _ = match stream.read(&mut buffer) {
+                Ok(0) => return Ok(()), // connection closed
+                Ok(n) => n,
+                Err(_) => return Ok(()), // error occurred
+            };
+
             Ok(())
         }
         Err(e) => Err(format!("Master node doesn't exists: {}", e)),

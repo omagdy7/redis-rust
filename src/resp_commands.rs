@@ -118,6 +118,7 @@ pub enum RedisCommands {
     Keys(String),
     Info(String),
     ReplConf((String, String)),
+    Psync((String, String)),
     Invalid,
 }
 
@@ -254,6 +255,18 @@ impl RedisCommands {
             }
             RC::ReplConf((_, _)) => {
                 resp_bytes!("OK")
+            }
+            RC::Psync((_, _)) => {
+                let config = config.clone();
+                let mut server = RedisServer::new();
+                if let Some(conf) = config.as_ref() {
+                    server = conf.server.clone();
+                }
+                let response = format!(
+                    "FULLRESYNC {} 0",
+                    server.master_replid.unwrap_or("".to_string()),
+                );
+                resp_bytes!(response)
             }
             RC::Invalid => todo!(),
         }
@@ -444,6 +457,15 @@ impl From<RespType> for RedisCommands {
                     return Self::Invalid;
                 };
                 Self::ReplConf((op1, op2))
+            }
+            "PSYNC" => {
+                let Some(repl_id) = args.next() else {
+                    return Self::Invalid;
+                };
+                let Some(repl_offset) = args.next() else {
+                    return Self::Invalid;
+                };
+                Self::Psync((repl_id, repl_offset))
             }
             _ => Self::Invalid,
         }
