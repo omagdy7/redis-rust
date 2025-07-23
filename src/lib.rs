@@ -5,6 +5,8 @@ use std::{
     net::{TcpListener, TcpStream},
 };
 
+use crate::resp_parser::parse;
+
 #[macro_use]
 pub mod macros;
 pub mod rdb;
@@ -50,16 +52,37 @@ fn handshake_process(slave: &RedisServer) -> Result<(), String> {
     // PING
     match TcpStream::connect(master_address) {
         Ok(mut stream) => {
+            let mut buffer = [0; 512];
+
+            // PING
             if let Err(e) = stream.write_all(&resp_bytes!(array => [resp!(bulk "PING")])) {
                 return Err(format!("Failed to send: {}", e));
-            } else {
-                Ok(())
             }
+
+            let _ = match stream.read(&mut buffer) {
+                Ok(0) => return Ok(()), // connection closed
+                Ok(n) => n,
+                Err(_) => return Ok(()), // error occurred
+            };
+
+            // REPLCONF
+            if let Err(e) = stream.write_all(&resp_bytes!(array => [resp!(bulk "REPLCONF"), resp!(bulk "listening-port"), resp!(bulk slave.port.clone())])) {
+                return Err(format!("Failed to send: {}", e));
+            }
+
+            let _ = match stream.read(&mut buffer) {
+                Ok(0) => return Ok(()), // connection closed
+                Ok(n) => n,
+                Err(_) => return Ok(()), // error occurred
+            };
+
+            if let Err(e) = stream.write_all(&resp_bytes!(array => [resp!(bulk "REPLCONF"), resp!(bulk "capa"), resp!(bulk "psync2")])) {
+                return Err(format!("Failed to send: {}", e));
+            }
+            Ok(())
         }
         Err(e) => Err(format!("Master node doesn't exists: {}", e)),
     }
-
-    // REPLCONF
 
     // PSYNC
 }

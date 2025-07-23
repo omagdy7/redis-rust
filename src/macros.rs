@@ -29,7 +29,6 @@ macro_rules! resp_bytes {
     };
 
     // Array: resp!(array => [resp!(bulk "one"), resp!(int 2)])
-    // FIXME: this doesn't work and errors
     (array => [$($elem:expr),*]) => {
         RespType::Array(vec![$($elem),*]).to_resp_bytes()
     };
@@ -118,7 +117,6 @@ macro_rules! resp {
     };
 
     // Array: resp!(array => [resp!(bulk "one"), resp!(int 2)])
-    // FIXME: this doesn't work and errors
     (array => [$($elem:expr),*]) => {
         RespType::Array(vec![$($elem),*])
     };

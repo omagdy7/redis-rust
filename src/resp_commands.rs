@@ -117,6 +117,7 @@ pub enum RedisCommands {
     ConfigGet(String),
     Keys(String),
     Info(String),
+    ReplConf((String, String)),
     Invalid,
 }
 
@@ -250,6 +251,9 @@ impl RedisCommands {
                 .as_bytes()
                 .to_vec();
                 RT::BulkString(response).to_resp_bytes()
+            }
+            RC::ReplConf((_, _)) => {
+                resp_bytes!("OK")
             }
             RC::Invalid => todo!(),
         }
@@ -431,6 +435,15 @@ impl From<RespType> for RedisCommands {
                     return Self::Info(sub_command);
                 }
                 Self::Invalid
+            }
+            "REPLCONF" => {
+                let Some(op1) = args.next() else {
+                    return Self::Invalid;
+                };
+                let Some(op2) = args.next() else {
+                    return Self::Invalid;
+                };
+                Self::ReplConf((op1, op2))
             }
             _ => Self::Invalid,
         }
