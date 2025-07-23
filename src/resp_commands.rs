@@ -259,7 +259,7 @@ impl RedisCommands {
                             "# Replication\r\nrole:{}master_replid:{}master_repl_offset:{}",
                             server.role(),
                             master.replid.clone().unwrap_or("".to_string()),
-                            master.current_offset.clone().unwrap_or("".to_string())
+                            master.current_offset.lock().unwrap(),
                         )
                         .as_bytes()
                         .to_vec();
@@ -270,7 +270,7 @@ impl RedisCommands {
                             "# Replication\r\nrole:{}master_replid:{}master_repl_offset:{}",
                             server.role(),
                             slave.master_replid.clone().unwrap_or("".to_string()),
-                            slave.master_repl_offset.clone().unwrap_or("".to_string())
+                            slave.master_repl_offset.lock().unwrap()
                         )
                         .as_bytes()
                         .to_vec();
@@ -278,9 +278,13 @@ impl RedisCommands {
                     }
                 }
             }
-            RC::ReplConf((_, _)) => {
-                resp_bytes!("OK")
-            }
+            RC::ReplConf((op1, op2)) => match (op1.to_uppercase().as_str(), op2.as_str()) {
+                ("GETACK", "*") => {
+                    println!("Did i even get here?");
+                    resp_bytes!(array => [resp!(bulk "REPLCONF"), resp!(bulk "ACK"), resp!(bulk server.lock().unwrap().repl_offset().to_string())])
+                }
+                _ => resp_bytes!("OK"),
+            },
             RC::Psync((_, _)) => {
                 let server = server.lock().unwrap();
                 if let RedisServer::Master(master) = &*server {
@@ -482,6 +486,7 @@ impl From<RespType> for RedisCommands {
                 let Some(op2) = args.next() else {
                     return Self::Invalid;
                 };
+                println!("Hello from here");
                 Self::ReplConf((op1, op2))
             }
             "PSYNC" => {
