@@ -67,21 +67,21 @@ fn handshake_process(slave: &RedisServer) -> Result<(), String> {
             // PING
             send_command(&resp_bytes!(array => [resp!(bulk "PING")]))?;
 
-            // REPLCONF listening-port
+            // REPLCONF listening-port <PORT>
             send_command(&resp_bytes!(array => [
                 resp!(bulk "REPLCONF"),
                 resp!(bulk "listening-port"),
                 resp!(bulk slave.port.clone())
             ]))?;
 
-            // REPLCONF capa
+            // REPLCONF capa psync2
             send_command(&resp_bytes!(array => [
                 resp!(bulk "REPLCONF"),
                 resp!(bulk "capa"),
                 resp!(bulk "psync2")
             ]))?;
 
-            // PSYNC
+            // PSYNC <REPL_ID> <REPL_OFFSSET>
             send_command(&resp_bytes!(array => [
                 resp!(bulk "PSYNC"),
                 resp!(bulk "?"),

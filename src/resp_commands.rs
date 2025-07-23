@@ -266,6 +266,7 @@ impl RedisCommands {
                     "FULLRESYNC {} 0",
                     server.master_replid.unwrap_or("".to_string()),
                 );
+
                 resp_bytes!(response)
             }
             RC::Invalid => todo!(),

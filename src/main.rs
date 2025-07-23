@@ -3,6 +3,7 @@ use core::time;
 use std::{
     collections::HashMap,
     env,
+    fmt::format,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
@@ -12,6 +13,7 @@ use std::{
 
 use codecrafters_redis::{
     rdb::{KeyExpiry, ParseError, RDBFile, RedisValue},
+    resp_bytes,
     shared_cache::*,
 };
 use codecrafters_redis::{resp_commands::RedisCommands, Config};
@@ -38,6 +40,23 @@ fn spawn_cleanup_thread(cache: SharedCache) {
     });
 }
 
+use base64::{engine::general_purpose, Engine as _};
+
+fn write_rdb_to_stream<W: Write>(writer: &mut W) -> Result<(), Box<dyn std::error::Error>> {
+    let hardcoded_rdb = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
+
+    let bytes = general_purpose::STANDARD.decode(hardcoded_rdb)?;
+
+    let mut response = format!("${}\r\n", bytes.len()).into_bytes();
+    response.extend_from_slice(&bytes);
+
+    // Write the binary RDB data
+    writer.write_all(&response)?;
+
+    Ok(())
+}
+
+// TODO: This should return a Result to handle the plethora of different errors
 fn handle_client(mut stream: TcpStream, cache: SharedCache, config: SharedConfig) {
     let mut buffer = [0; 512];
 
@@ -48,11 +67,32 @@ fn handle_client(mut stream: TcpStream, cache: SharedCache, config: SharedConfig
             Err(_) => return, // error occurred
         };
 
-        let parsed_resp = parse(&buffer).unwrap();
-        let response = RedisCommands::from(parsed_resp.0).execute(cache.clone(), config.clone());
+        let request = parse(&buffer).unwrap();
+        let response =
+            RedisCommands::from(request.0.clone()).execute(cache.clone(), config.clone());
 
-        // write respose back to the client
-        stream.write(&response).unwrap();
+        let mut request_command = "".to_string();
+
+        // FIXME: Find a solution for this mess!!
+        match &request.0 {
+            RespType::Array(arr) => {
+                if let RespType::BulkString(s) = arr[0].clone() {
+                    request_command = String::from_utf8(s).unwrap();
+                }
+            }
+            _ => {}
+        }
+
+        // if this true immediately write and send back rdb file after response
+        // HACK: This just feels wrong I feel this shouldn't be handled here and should be handled
+        // in the exexute command
+        if request_command.starts_with("PSYNC") {
+            stream.write(&response).unwrap();
+            let _ = write_rdb_to_stream(&mut stream);
+        } else {
+            // write respose back to the client
+            stream.write(&response).unwrap();
+        }
     }
 }
 
