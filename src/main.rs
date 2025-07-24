@@ -14,15 +14,16 @@ use std::{
 use codecrafters_redis::{
     rdb::{KeyExpiry, ParseError, RDBFile, RedisValue},
     resp_bytes,
+    server::SharedMut,
     shared_cache::*,
 };
-use codecrafters_redis::{resp_commands::RedisCommands, server::RedisServer};
+use codecrafters_redis::{resp_commands::RedisCommand, server::RedisServer};
 use codecrafters_redis::{
     resp_parser::{parse, RespType},
     server::SlaveServer,
 };
 
-fn spawn_cleanup_thread(cache: SharedCache) {
+fn spawn_cleanup_thread(cache: SharedMut<Cache>) {
     let cache_clone = cache.clone();
     std::thread::spawn(move || {
         loop {
@@ -68,12 +69,25 @@ fn handle_client(mut stream: TcpStream, server: Arc<Mutex<RedisServer>>) {
         };
 
         let request = parse(&buffer).unwrap();
-        let server_clone = Arc::clone(&server);
-        let response = RedisCommands::from(request.0.clone()).execute(server_clone);
+
+        let mut server = server.lock().unwrap();
+
+        // Big State vars
+        let cache = server.cache().clone();
+        let server_state = server.get_server_state().clone();
+        let config = server.config();
+        let brodcaster = server.as_broadcaster();
+
+        let response = RedisCommand::from(request.0.clone()).execute(
+            cache.clone(),
+            config,
+            server_state,
+            brodcaster,
+        );
 
         let mut request_command = "".to_string();
 
-        // FIXME: Find a solution for this mess!!
+        // FIXME: Find a solution for this mess!! (Design better API)
         match &request.0 {
             RespType::Array(arr) => {
                 if let RespType::BulkString(s) = arr[0].clone() {
@@ -84,22 +98,28 @@ fn handle_client(mut stream: TcpStream, server: Arc<Mutex<RedisServer>>) {
         }
 
         // Store the persistent connection
-        let shared_stream = Arc::new(Mutex::new(
-            stream.try_clone().expect("What could go wrong? :)"),
-        ));
+        // let shared_stream = Arc::new(Mutex::new(
+        //     stream.try_clone().expect("What could go wrong? :)"),
+        // ));
 
         // if this true immediately write and send back rdb file after response
         // HACK: This just feels wrong I feel this shouldn't be handled here and should be handled
         // in the exexute command
         if request_command.starts_with("PSYNC") {
             stream.write(&response).unwrap();
-            let _ = write_rdb_to_stream(&mut stream);
-            // handshake completed and I should add the server sending me the handshake to my replicas
             let replica_addr = stream
                 .peer_addr()
                 .expect("This shouldn't fail right? right?? :)");
-            let mut server = server.lock().unwrap();
-            server.add_replica(replica_addr, shared_stream);
+
+            server.add_replica(
+                replica_addr,
+                Arc::new(Mutex::new(
+                    stream.try_clone().expect("What could go wrong? :)"),
+                )),
+            );
+
+            let _ = write_rdb_to_stream(&mut stream);
+            // handshake completed and I should add the server sending me the handshake to my replicas
         } else {
             // write respose back to the client
             stream.write(&response).unwrap();

@@ -37,6 +37,15 @@ fn test_valid_simple_strings() {
 }
 
 #[test]
+fn test_full_resync_string() {
+    let input = b"+FULLRESYNC 75cd7bc10c49047e0d163660f3b90625b1af31dc 0\r\n".to_vec();
+    assert_eq!(
+        parse(&input).unwrap().0,
+        "FULLRESYNC 75cd7bc10c49047e0d163660f3b90625b1af31dc 0"
+    )
+}
+
+#[test]
 fn test_invalid_prefix() {
     // Missing '+' prefix
     assert_eq!(

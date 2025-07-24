@@ -3,11 +3,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use codecrafters_redis::resp_parser::RespType;
-use codecrafters_redis::shared_cache::{CacheEntry, SharedCache};
+use codecrafters_redis::server::SharedMut;
+use codecrafters_redis::shared_cache::{Cache, CacheEntry};
 
 // Test Helpers & Mocks
 /// Creates a new, empty shared cache for each test.
-fn new_cache() -> SharedCache {
+fn new_cache() -> SharedMut<Cache> {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
@@ -21,14 +22,14 @@ fn build_command_from_str_slice(args: &[&str]) -> RespType {
 }
 
 /// A helper to get a value directly from the cache for assertions.
-fn get_from_cache(cache: &SharedCache, key: &str) -> Option<CacheEntry> {
+fn get_from_cache(cache: &SharedMut<Cache>, key: &str) -> Option<CacheEntry> {
     cache.lock().unwrap().get(key).cloned()
 }
 
 /// Tests for the `RedisCommands::from(RespType)` parser logic.
 mod command_parser_tests {
     use codecrafters_redis::resp_commands::ExpiryOption;
-    use codecrafters_redis::resp_commands::RedisCommands;
+    use codecrafters_redis::resp_commands::RedisCommand;
     use codecrafters_redis::resp_commands::SetCondition;
     use codecrafters_redis::resp_parser::RespType;
 
@@ -37,26 +38,26 @@ mod command_parser_tests {
     #[test]
     fn test_parse_ping() {
         let cmd = build_command_from_str_slice(&["PING"]);
-        assert!(matches!(RedisCommands::from(cmd), RedisCommands::Ping));
+        assert!(matches!(RedisCommand::from(cmd), RedisCommand::Ping));
     }
 
     #[test]
     fn test_parse_ping_case_insensitive() {
         let cmd = build_command_from_str_slice(&["pInG"]);
-        assert!(matches!(RedisCommands::from(cmd), RedisCommands::Ping));
+        assert!(matches!(RedisCommand::from(cmd), RedisCommand::Ping));
     }
 
     #[test]
     fn test_parse_ping_with_extra_args_is_invalid() {
         let cmd = build_command_from_str_slice(&["PING", "extra"]);
-        assert!(matches!(RedisCommands::from(cmd), RedisCommands::Invalid));
+        assert!(matches!(RedisCommand::from(cmd), RedisCommand::Invalid));
     }
 
     #[test]
     fn test_parse_echo() {
         let cmd = build_command_from_str_slice(&["ECHO", "hello world"]);
-        match RedisCommands::from(cmd) {
-            RedisCommands::Echo(s) => assert_eq!(s, "hello world"),
+        match RedisCommand::from(cmd) {
+            RedisCommand::Echo(s) => assert_eq!(s, "hello world"),
             _ => panic!("Expected ECHO command"),
         }
     }
@@ -64,14 +65,14 @@ mod command_parser_tests {
     #[test]
     fn test_parse_echo_no_args_is_invalid() {
         let cmd = build_command_from_str_slice(&["ECHO"]);
-        assert!(matches!(RedisCommands::from(cmd), RedisCommands::Invalid));
+        assert!(matches!(RedisCommand::from(cmd), RedisCommand::Invalid));
     }
 
     #[test]
     fn test_parse_get() {
         let cmd = build_command_from_str_slice(&["GET", "mykey"]);
-        match RedisCommands::from(cmd) {
-            RedisCommands::Get(k) => assert_eq!(k, "mykey"),
+        match RedisCommand::from(cmd) {
+            RedisCommand::Get(k) => assert_eq!(k, "mykey"),
             _ => panic!("Expected GET command"),
         }
     }
@@ -79,8 +80,8 @@ mod command_parser_tests {
     #[test]
     fn test_parse_simple_set() {
         let cmd = build_command_from_str_slice(&["SET", "mykey", "myvalue"]);
-        match RedisCommands::from(cmd) {
-            RedisCommands::Set(c) => {
+        match RedisCommand::from(cmd) {
+            RedisCommand::Set(c) => {
                 assert_eq!(c.key, "mykey");
                 assert_eq!(c.value, "myvalue");
                 assert!(c.condition.is_none() && c.expiry.is_none() && !c.get_old_value);
@@ -92,8 +93,8 @@ mod command_parser_tests {
     #[test]
     fn test_parse_set_with_all_options() {
         let cmd = build_command_from_str_slice(&["SET", "k", "v", "NX", "PX", "5000", "GET"]);
-        match RedisCommands::from(cmd) {
-            RedisCommands::Set(c) => {
+        match RedisCommand::from(cmd) {
+            RedisCommand::Set(c) => {
                 assert!(matches!(c.condition, Some(SetCondition::NotExists)));
                 assert!(matches!(c.expiry, Some(ExpiryOption::Milliseconds(5000))));
                 assert!(c.get_old_value);
@@ -105,8 +106,8 @@ mod command_parser_tests {
     #[test]
     fn test_parse_set_options_case_insensitive() {
         let cmd = build_command_from_str_slice(&["set", "k", "v", "nx", "px", "100"]);
-        match RedisCommands::from(cmd) {
-            RedisCommands::Set(c) => {
+        match RedisCommand::from(cmd) {
+            RedisCommand::Set(c) => {
                 assert!(matches!(c.condition, Some(SetCondition::NotExists)));
                 assert!(matches!(c.expiry, Some(ExpiryOption::Milliseconds(100))));
             }
@@ -117,43 +118,46 @@ mod command_parser_tests {
     #[test]
     fn test_parse_set_invalid_option_value() {
         let cmd = build_command_from_str_slice(&["SET", "k", "v", "EX", "not-a-number"]);
-        assert!(matches!(RedisCommands::from(cmd), RedisCommands::Invalid));
+        assert!(matches!(RedisCommand::from(cmd), RedisCommand::Invalid));
     }
 
     #[test]
     fn test_parse_set_option_missing_value() {
         let cmd = build_command_from_str_slice(&["SET", "k", "v", "PX"]);
-        assert!(matches!(RedisCommands::from(cmd), RedisCommands::Invalid));
+        assert!(matches!(RedisCommand::from(cmd), RedisCommand::Invalid));
     }
 
     #[test]
     fn test_parse_unknown_command() {
         let cmd = build_command_from_str_slice(&["UNKNOWN", "foo"]);
-        assert!(matches!(RedisCommands::from(cmd), RedisCommands::Invalid));
+        assert!(matches!(RedisCommand::from(cmd), RedisCommand::Invalid));
     }
 
     #[test]
     fn test_parse_not_an_array_is_invalid() {
         let cmd = RespType::SimpleString("SET k v".into());
-        assert!(matches!(RedisCommands::from(cmd), RedisCommands::Invalid));
+        assert!(matches!(RedisCommand::from(cmd), RedisCommand::Invalid));
     }
 }
 
 /// Tests for the command execution logic in `RedisCommands::execute`.
 mod command_execution_tests {
-    use codecrafters_redis::resp_commands::RedisCommands;
-    use codecrafters_redis::server::RedisServer;
+    use codecrafters_redis::resp_commands::RedisCommand;
+    use codecrafters_redis::server::{CanBroadcast, RedisServer};
     use std::time::Duration;
 
     use super::*;
 
     /// Helper to parse and execute a command against a cache.
-    fn run_command(cache: &SharedCache, args: &[&str]) -> Vec<u8> {
-        let command = RedisCommands::from(build_command_from_str_slice(args));
+    fn run_command(cache: &SharedMut<Cache>, args: &[&str]) -> Vec<u8> {
+        let command = RedisCommand::from(build_command_from_str_slice(args));
         let mut server = RedisServer::master();
         server.set_cache(cache);
+        let config = server.config();
+        let state = server.get_server_state();
+        let broadcaster = None::<Arc<Mutex<&mut dyn CanBroadcast>>>;
 
-        command.execute(Arc::new(Mutex::new(server)))
+        command.execute(cache.clone(), config, state, broadcaster)
     }
 
     #[test]

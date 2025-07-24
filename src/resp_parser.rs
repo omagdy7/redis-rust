@@ -380,18 +380,17 @@ pub fn parse_bulk_strings(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> 
                 return Err(RespError::UnexpectedEnd);
             }
 
-            let mut bulk_string: Vec<u8> = Vec::with_capacity(length as usize);
+            let bulk_string = remained[..length as usize].to_vec();
+            let remaining_after_string = &remained[length as usize..];
 
-            for i in 0..length {
-                bulk_string.push(remained[i as usize]);
-            }
-
-            let consumed = RespType::BulkString(bulk_string);
-
-            if !(&remained[length as usize..]).starts_with(b"\r\n") {
+            if !remaining_after_string.starts_with(b"\r\n") {
                 return Err(RespError::UnexpectedEnd);
             }
-            return Ok((consumed, &remained[length as usize + 2..]));
+
+            Ok((
+                RespType::BulkString(bulk_string),
+                &remaining_after_string[2..],
+            ))
         }
         [] => Err(RespError::Custom(String::from("Empty data"))),
     }

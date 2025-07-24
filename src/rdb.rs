@@ -600,6 +600,20 @@ impl FromBytes for RDBFile {
         let mut total_consumed = 0;
         let mut databases = HashMap::new();
 
+        // special case when rdb file is sent by the master to replicas in the following format
+        // $<length>/r/n<bytes_of_length_length>
+        if bytes[0] == '$' as u8 {
+            // consume up to the CRLF
+            let (consumed, rest) = bytes
+                .windows(2)
+                .position(|window| window == b"\r\n")
+                .map(|pos| (&bytes[..pos], &bytes[pos + 2..]))
+                .ok_or(ParseError::UnexpectedEof)?;
+            println!("Consumed {:?}", consumed);
+            remaining = rest;
+            total_consumed += consumed.len();
+        }
+
         // 1. Parse the RDB header ("REDIS" + version)
         let (header, consumed) = RDBHeader::from_bytes(remaining)?;
         total_consumed += consumed;

@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -24,4 +23,4 @@ impl CacheEntry {
     }
 }
 
-pub type SharedCache = Arc<Mutex<HashMap<String, CacheEntry>>>;
+pub type Cache = HashMap<String, CacheEntry>;
