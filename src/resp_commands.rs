@@ -1,7 +1,11 @@
+use crate::server::BoxedAsyncWrite;
 use crate::server::*;
 use crate::{resp_parser::*, shared_cache::*};
 use regex::Regex;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 #[derive(Debug, Clone)]
 pub enum SetCondition {
@@ -122,22 +126,50 @@ pub enum RedisCommand {
     Invalid,
 }
 
+use base64::{Engine as _, engine::general_purpose};
+
+async fn write_rdb_to_stream<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let hardcoded_rdb = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
+
+    let bytes = general_purpose::STANDARD.decode(hardcoded_rdb)?;
+
+    let mut response = format!("${}\r\n", bytes.len()).into_bytes();
+    response.extend_from_slice(&bytes);
+
+    // Write the binary RDB data
+    let _ = writer.write_all(&response);
+
+    Ok(())
+}
+
 impl RedisCommand {
-    pub fn execute<'a>(
+    pub async fn execute<W: AsyncWrite + Unpin + Send + 'static>(
         self,
+        writer: SharedMut<W>,
+        socket_addr: SocketAddr,
+        replication_msg_sender: Option<&tokio::sync::mpsc::Sender<ReplicationMsg<W>>>,
         cache: SharedMut<Cache>,
         config: Shared<ServerConfig>,
         server_state: ServerState,
-        broadcaster: Option<SharedMut<&mut dyn CanBroadcast>>,
     ) -> Vec<u8> {
         use RedisCommand as RC;
         match self {
-            RC::Ping => resp_bytes!("PONG"),
-            RC::Echo(echo_string) => resp_bytes!(echo_string),
+            RC::Ping => {
+                let response = resp_bytes!("PONG");
+                let _ = writer.lock().await.write(&response).await;
+                response
+            }
+            RC::Echo(echo_string) => {
+                let response = resp_bytes!(echo_string);
+                let _ = writer.lock().await.write(&response).await;
+                response
+            }
             RC::Get(key) => {
-                let mut cache = cache.lock().unwrap();
-
-                match cache.get(&key).cloned() {
+                let mut cache = cache.lock().await;
+                println!("cache: {:?}", cache);
+                let response = match cache.get(&key).cloned() {
                     Some(entry) => {
                         if entry.is_expired() {
                             cache.remove(&key); // Clean up expired key
@@ -147,20 +179,30 @@ impl RedisCommand {
                         }
                     }
                     None => resp_bytes!(null),
-                }
+                };
+                let _ = writer.lock().await.write(&response).await;
+                response
             }
             RC::Set(command) => {
-                let mut cache = cache.lock().unwrap();
+                println!(
+                    "I am a {:?} and setting command is {:?}",
+                    server_state.role, command
+                );
+                let mut cache = cache.lock().await;
 
                 // Check conditions (NX/XX)
                 let key_exists = cache.contains_key(&command.key);
 
                 match command.condition {
                     Some(SetCondition::NotExists) if key_exists => {
-                        return resp_bytes!(null); // Key exists, NX failed
+                        let response = resp_bytes!(null);
+                        let _ = writer.lock().await.write(&response).await;
+                        return response; // Key exists, NX failed
                     }
                     Some(SetCondition::Exists) if !key_exists => {
-                        return resp_bytes!(null); // Key doesn't exist, XX failed
+                        let response = resp_bytes!(null);
+                        let _ = writer.lock().await.write(&response).await;
+                        return response; // Key doesn't exist, XX failed
                     }
                     _ => {} // No condition or condition met
                 }
@@ -198,32 +240,40 @@ impl RedisCommand {
                     server_state.role, &command.key, command.value
                 );
 
-                // Broadcast to replicas if this is a master
-                if let Some(broadcaster) = broadcaster {
-                    // Broadcast SET to replicas after mutating local state
-                    let broadcast_cmd = resp_bytes!(array => [
-                        resp!(bulk "SET"),
-                        resp!(bulk command.key),
-                        resp!(bulk command.value)
-                    ]);
-                    broadcaster
-                        .lock()
-                        .unwrap()
-                        .broadcast_command_to_replicas(&broadcast_cmd);
+                // broadcast message to replicas
+                let broadcast_cmd = resp_bytes!(array => [
+                    resp!(bulk "SET"),
+                    resp!(bulk command.key),
+                    resp!(bulk command.value)
+                ]);
+
+                if let Some(sender) = replication_msg_sender {
+                    println!(
+                        "I am master and sending command : {}",
+                        bytes_to_ascii(&broadcast_cmd)
+                    );
+                    let _ = sender.send(ReplicationMsg::Broadcast(broadcast_cmd)).await;
                 }
 
-                if !command.get_old_value {
-                    return resp_bytes!("OK");
-                }
+                let response = if !command.get_old_value {
+                    resp_bytes!("OK")
+                } else {
+                    match get_value {
+                        Some(val) => resp_bytes!(bulk val),
+                        None => resp_bytes!(null),
+                    }
+                };
 
-                match get_value {
-                    Some(val) => return resp_bytes!(bulk val),
-                    None => return resp_bytes!(null),
+                if let ServerRole::Master = server_state.role {
+                    let mut writer_guard = writer.lock().await;
+                    let _ = writer_guard.write_all(&response).await;
+                    let _ = writer_guard.flush().await;
                 }
+                response
             }
             RC::ConfigGet(s) => {
                 use RespType as RT;
-                if let (Some(dir), Some(dbfilename)) =
+                let response = if let (Some(dir), Some(dbfilename)) =
                     (config.dir.clone(), config.dbfilename.clone())
                 {
                     match s.as_str() {
@@ -241,13 +291,15 @@ impl RedisCommand {
                     }
                 } else {
                     unreachable!()
-                }
+                };
+                let _ = writer.lock().await.write(&response).await;
+                response
             }
             RC::Keys(query) => {
                 use RespType as RT;
 
                 let query = query.replace('*', ".*");
-                let cache = cache.lock().unwrap();
+                let cache = cache.lock().await;
                 let regex = Regex::new(&query).unwrap();
                 let matching_keys: Vec<RT> = cache
                     .keys()
@@ -257,7 +309,9 @@ impl RedisCommand {
                             .then(|| RT::BulkString(key.as_bytes().to_vec()))
                     })
                     .collect();
-                RT::Array(matching_keys).to_resp_bytes()
+                let response = RT::Array(matching_keys).to_resp_bytes();
+                let _ = writer.lock().await.write(&response).await;
+                response
             }
             RC::Info(_sub_command) => {
                 use RespType as RT;
@@ -266,37 +320,74 @@ impl RedisCommand {
                     ServerRole::Slave => "slave",
                 };
 
-                let response = format!(
+                let info_response = format!(
                     "# Replication\r\nrole:{}\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
                     role_str, server_state.repl_id, server_state.repl_offset,
                 )
                 .into_bytes();
 
-                RT::BulkString(response).to_resp_bytes()
+                let response = RT::BulkString(info_response).to_resp_bytes();
+                let _ = writer.lock().await.write(&response).await;
+                response
             }
-            RC::ReplConf((op1, op2)) => match (op1.to_uppercase().as_str(), op2.as_str()) {
-                ("GETACK", "*") => {
-                    println!("Did i even get here?");
-                    resp_bytes!(array => [resp!(bulk "REPLCONF"), resp!(bulk "ACK"), resp!(bulk server_state.repl_offset.to_string())])
-                }
-                _ => resp_bytes!("OK"),
-            },
+            RC::ReplConf((op1, op2)) => {
+                let response = match (op1.to_uppercase().as_str(), op2.as_str()) {
+                    ("GETACK", "*") => {
+                        println!("Did i even get here?");
+                        resp_bytes!(array => [resp!(bulk "REPLCONF"), resp!(bulk "ACK"), resp!(bulk server_state.repl_offset.to_string())])
+                    }
+                    _ => resp_bytes!("OK"),
+                };
+                let _ = writer.lock().await.write(&response).await;
+                response
+            }
             RC::Psync((_, _)) => {
-                // This should only be called on masters
+                // If I am here I just complete all the handshake steps
                 match server_state.role {
                     ServerRole::Master => {
-                        let response = format!("FULLRESYNC {} 0", server_state.repl_id);
-                        resp_bytes!(response)
+                        // I can unwrap here because I know it's a master and won't panic
+                        let response_str = format!("FULLRESYNC {} 0", server_state.repl_id);
+                        let response = resp_bytes!(response_str);
+
+                        let writer_clone = Arc::clone(&writer);
+                        let mut writer_guard = writer.lock().await;
+                        // let replica_addr = writer_guard
+                        //     .drop()
+                        //     .expect("This shouldn't fail right? right?? :)");
+
+                        let _ = replication_msg_sender
+                            .expect("This should never logically fail as I precheck that I am a master server")
+                            .send(ReplicationMsg::AddReplica(socket_addr, writer_clone))
+                            .await;
+
+                        let _ = writer_guard.write(&response).await;
+                        // TODO: find a way to put this back into a seprate function
+                        let hardcoded_rdb = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
+
+                        let bytes = general_purpose::STANDARD.decode(hardcoded_rdb).unwrap();
+
+                        let mut response = format!("${}\r\n", bytes.len()).into_bytes();
+                        response.extend_from_slice(&bytes);
+
+                        // Write the binary RDB data
+                        let _ = writer_guard.write_all(&response).await;
+                        let _ = writer_guard.flush().await;
+
+                        response
                     }
                     // This shouldn't happen, but handle gracefully
                     ServerRole::Slave => {
-                        // TODO: I actually forgot that you could send error messages with redis do
-                        // more of this across the whole codebase when it makes sense
-                        resp_bytes!(error "ERR PSYNC not supported on slave")
+                        let response = resp_bytes!(error "ERR PSYNC not supported on slave");
+                        let _ = writer.lock().await.write(&response).await;
+                        response
                     }
                 }
             }
-            RC::Invalid => resp_bytes!(error "ERR Invalid Command"),
+            RC::Invalid => {
+                let response = resp_bytes!(error "ERR Invalid Command");
+                let _ = writer.lock().await.write(&response).await;
+                response
+            }
         }
     }
 }
@@ -484,7 +575,6 @@ impl From<RespType> for RedisCommand {
                 let Some(op2) = args.next() else {
                     return Self::Invalid;
                 };
-                println!("Hello from here");
                 Self::ReplConf((op1, op2))
             }
             "PSYNC" => {

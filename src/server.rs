@@ -1,16 +1,337 @@
 use crate::rdb::{FromBytes, RDBFile};
 use crate::resp_commands::RedisCommand;
-use crate::resp_parser::{parse, RespType};
+use crate::resp_parser::{RespType, parse};
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
-use std::sync::{Arc, Mutex};
-use std::{env, thread};
+use std::env;
+use std::io::Read;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::sync::Mutex;
+use tokio::sync::mpsc::Sender;
 
 use crate::shared_cache::Cache;
 
-// TODO: add functions to access member variables instead of accessing them directly
+pub fn bytes_to_ascii(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|&byte| (byte as char).to_string())
+        .collect::<Vec<String>>()
+        .join("")
+}
 
+pub trait RedisNode: Send + Sync {
+    fn role(&self) -> &str;
+    fn is_master(&self) -> bool;
+    fn is_slave(&self) -> bool;
+    fn config(&self) -> Shared<ServerConfig>;
+    fn cache(&self) -> &SharedMut<Cache>;
+}
+
+trait SlaveRole: RedisNode {
+    async fn connect(&self) -> Result<TcpStream, std::io::Error>;
+    async fn handshake(&mut self) -> Result<(), String>;
+    // TODO: This should return a Result
+    async fn start_replication_listener(self, rest: &mut &[u8]);
+}
+
+impl<W: AsyncWrite + Send + Unpin + 'static> RedisNode for MasterServer<W> {
+    fn role(&self) -> &str {
+        "master"
+    }
+
+    fn config(&self) -> Shared<ServerConfig> {
+        self.config.clone()
+    }
+
+    fn cache(&self) -> &SharedMut<Cache> {
+        &self.cache
+    }
+
+    fn is_master(&self) -> bool {
+        true
+    }
+
+    fn is_slave(&self) -> bool {
+        false
+    }
+}
+
+impl RedisNode for SlaveServer {
+    fn config(&self) -> Shared<ServerConfig> {
+        self.config.clone()
+    }
+
+    fn cache(&self) -> &SharedMut<Cache> {
+        &self.cache
+    }
+
+    fn role(&self) -> &str {
+        "slave"
+    }
+
+    fn is_master(&self) -> bool {
+        false
+    }
+
+    fn is_slave(&self) -> bool {
+        true
+    }
+}
+
+impl<W: AsyncWrite + Send + Unpin + 'static> RedisNode for RedisServer<W> {
+    fn role(&self) -> &str {
+        match self {
+            Self::Master(m) => m.role(),
+            Self::Slave(s) => s.role(),
+        }
+    }
+
+    fn is_master(&self) -> bool {
+        match self {
+            Self::Master(m) => m.is_master(),
+            Self::Slave(s) => s.is_master(),
+        }
+    }
+
+    fn is_slave(&self) -> bool {
+        match self {
+            Self::Master(m) => m.is_slave(),
+            Self::Slave(s) => s.is_slave(),
+        }
+    }
+
+    fn config(&self) -> Shared<ServerConfig> {
+        match self {
+            Self::Master(m) => m.config(),
+            Self::Slave(s) => s.config(),
+        }
+    }
+
+    fn cache(&self) -> &SharedMut<Cache> {
+        match self {
+            Self::Master(m) => m.cache(),
+            Self::Slave(s) => s.cache(),
+        }
+    }
+}
+
+impl SlaveRole for SlaveServer {
+    async fn connect(&self) -> Result<TcpStream, std::io::Error> {
+        let state = self.state.lock().await;
+        let master_address = format!("{}:{}", state.master_host, state.master_port);
+        TcpStream::connect(master_address).await
+    }
+
+    async fn handshake(&mut self) -> Result<(), String> {
+        match self.connect().await {
+            Ok(mut stream) => {
+                let mut buffer = [0; 1024];
+
+                let mut send_command = async |command: &[u8], read: bool| -> Result<(), String> {
+                    stream
+                        .write_all(command)
+                        .await
+                        .map_err(|e| format!("Failed to send: {}", e))?;
+
+                    if read {
+                        match stream.read(&mut buffer).await {
+                            Ok(0) | Err(_) => return Ok(()), // connection closed or error
+                            Ok(_) => Ok(()),
+                        }
+                    } else {
+                        Ok(())
+                    }
+                };
+
+                // Step1: PING
+                send_command(&resp_bytes!(array => [resp!(bulk "PING")]), true).await?;
+
+                let port = self.config.port.clone();
+                // Step2: REPLCONF listening-port <PORT>
+                send_command(
+                    &resp_bytes!(array => [
+                        resp!(bulk "REPLCONF"),
+                        resp!(bulk "listening-port"),
+                        resp!(bulk port)
+                    ]),
+                    true,
+                )
+                .await?;
+
+                // Step3: REPLCONF capa psync2
+                send_command(
+                    &resp_bytes!(array => [
+                        resp!(bulk "REPLCONF"),
+                        resp!(bulk "capa"),
+                        resp!(bulk "psync2")
+                    ]),
+                    true,
+                )
+                .await?;
+
+                // Step 4: PSYNC <REPL_ID> <REPL_OFFSSET>
+                send_command(
+                    &resp_bytes!(array => [
+                        resp!(bulk "PSYNC"),
+                        resp!(bulk "?"),
+                        resp!(bulk "-1")
+                    ]),
+                    false,
+                )
+                .await?;
+
+                // Step 5: Read FULLRESYNC response
+                let bytes_read = stream
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|e| format!("Failed to read FULLRESYNC: {}", e))?;
+                let (parsed, mut rest) = parse(&buffer[..bytes_read])
+                    .map_err(|e| format!("Failed to parse FULLRESYNC: {:?}", e))?;
+                match parsed {
+                    RespType::SimpleString(s) if s.starts_with("FULLRESYNC") => {
+                        // Expected response
+                    }
+                    _ => return Err("Invalid FULLRESYNC response".to_string()),
+                }
+
+                println!("rest: {:?}", bytes_to_ascii(rest));
+
+                println!("FULLRESYNC response bytes read: {}", bytes_read);
+
+                // So there is an interesting behaviour where the FULLRESYNC + RDB and if you are
+                // really lucky the REPLCONF would all get sent in one TCP segment so I shouldn't
+                // assume I would get nice segments refelecting each command
+                if !rest.is_empty() {
+                    // TODO: Sync the rdb_file with the slave's cache
+                    // TODO: Find a way to propagate the error up the stack by using anyhow or something
+                    let (rdb_file, bytes_consumed) = RDBFile::from_bytes(rest).unwrap();
+                    rest = &rest[bytes_consumed..];
+                    println!("rdb bytes: {}", bytes_consumed);
+                    println!("remaining btyes after rdb: {}", rest.len());
+                }
+
+                // Store the persistent connection
+                self.state.lock().await.connection = Some(Arc::new(Mutex::new(stream)));
+                self.clone().start_replication_listener(&mut rest).await;
+
+                Ok(())
+            }
+            Err(e) => Err(format!("Master node doesn't exist: {}", e)),
+        }
+    }
+
+    // TODO: This should return a Result
+    async fn start_replication_listener(self, rest: &mut &[u8]) {
+        let state = self.state.clone();
+        let server_state = self.get_server_state().await;
+        let cache = self.cache.clone();
+        let config = self.config.clone();
+
+        // The 'rest' variable might contain data from the handshake.
+        // We need to move it into the spawned task so it can be processed first.
+        let mut initial_data = rest.to_vec();
+
+        // Spawn the background listener thread
+        tokio::spawn(async move {
+            let mut buffer = [0u8; 1024];
+
+            // This is the main loop for listening to the master.
+            loop {
+                // First, process any leftover data from the handshake.
+                let mut all_data = initial_data.clone();
+                initial_data.clear(); // Clear it so we don't process it again
+
+                // Now, read new data from the master stream.
+                let bytes_read = {
+                    // We lock the state just long enough to get the stream and read from it.
+                    let mut state_guard = state.lock().await;
+                    if let Some(ref mut stream_arc) = state_guard.connection {
+                        let mut stream_guard = stream_arc.lock().await;
+                        match stream_guard.read(&mut buffer).await {
+                            Ok(0) => {
+                                eprintln!("Master disconnected.");
+                                break; // Exit the loop if connection is closed.
+                            }
+                            Ok(n) => n,
+                            Err(e) => {
+                                eprintln!("Error reading from master: {}", e);
+                                break; // Exit on error.
+                            }
+                        }
+                    } else {
+                        // This should not happen if the handshake was successful.
+                        eprintln!("No connection to master found.");
+                        break;
+                    }
+                };
+
+                // Combine leftover data with newly read data.
+                all_data.extend_from_slice(&buffer[..bytes_read]);
+                let mut remaining_bytes = all_data.as_slice();
+
+                // Process all complete commands in the buffer.
+                while !remaining_bytes.is_empty() {
+                    match parse(remaining_bytes) {
+                        Ok((resp, leftover)) => {
+                            let command_size = remaining_bytes.len() - leftover.len();
+
+                            let command = RedisCommand::from(resp);
+
+                            // Get a clone of the Arc<Mutex<TcpStream>> to pass to execute.
+                            // We must do this outside the main state lock to avoid deadlocks
+                            // if `execute` needs to lock it.
+                            let state_guard = state.lock().await;
+                            let socket_addr = state_guard
+                                .connection
+                                .clone()
+                                .unwrap()
+                                .lock()
+                                .await
+                                .peer_addr()
+                                .unwrap();
+                            let stream_clone = {
+                                let state_guard = state.lock().await;
+                                // .unwrap() is safe here because we checked for connection above.
+                                state_guard.connection.as_ref().unwrap().clone()
+                            };
+
+                            // Execute the command. This will update the cache for SET,
+                            // and it will handle writing responses for commands like REPLCONF.
+                            // We don't need the return value.
+                            let _ = command
+                                .execute(
+                                    stream_clone, // Pass the whole stream wrapped in Arc<Mutex>
+                                    socket_addr,
+                                    None,
+                                    cache.clone(),
+                                    config.clone(),
+                                    server_state.clone(),
+                                )
+                                .await;
+
+                            // IMPORTANT: After the command is processed, update the offset.
+                            let mut state_guard = state.lock().await;
+                            state_guard.master_repl_offset += command_size;
+
+                            // Continue parsing with the rest of the buffer.
+                            remaining_bytes = leftover;
+                        }
+                        Err(e) => {
+                            // A real parsing error.
+                            eprintln!("Failed to parse command from master: {:?}", e);
+                            // We might have corrupt data, so we break to avoid an infinite loop.
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
+// TODO: add functions to access member variables instead of accessing them directly
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub dir: Option<String>,
@@ -32,32 +353,20 @@ pub enum ServerRole {
     Slave,
 }
 
-// Trait for broadcasting - only masters can do this
-pub trait CanBroadcast: Send {
-    fn broadcast_command_to_replicas(&mut self, command: &[u8]);
-}
-
-// Implementation for Master
-impl CanBroadcast for MasterServer {
-    fn broadcast_command_to_replicas(&mut self, command: &[u8]) {
-        self.broadcast_command(command);
-    }
-}
-
 // Helper methods to extract server state
-impl MasterServer {
-    pub fn get_server_state(&self) -> ServerState {
+impl<W: AsyncWrite + Send + Unpin + 'static> MasterServer<W> {
+    pub async fn get_server_state(&self) -> ServerState {
         ServerState {
             role: ServerRole::Master,
-            repl_id: self.get_replid(),
-            repl_offset: self.get_repl_offset(),
+            repl_id: self.get_replid().await,
+            repl_offset: self.get_repl_offset().await,
         }
     }
 }
 
 impl SlaveServer {
-    pub fn get_server_state(&self) -> ServerState {
-        let state = self.state.lock().unwrap();
+    pub async fn get_server_state(&self) -> ServerState {
+        let state = self.state.lock().await;
         ServerState {
             role: ServerRole::Slave,
             repl_id: state.master_replid.clone(),
@@ -66,19 +375,19 @@ impl SlaveServer {
     }
 }
 
-impl RedisServer {
-    pub fn get_server_state(&self) -> ServerState {
+impl<W: AsyncWrite + Send + Unpin + 'static> RedisServer<W> {
+    pub async fn get_server_state(&self) -> ServerState {
         match self {
-            RedisServer::Master(master) => master.get_server_state(),
-            RedisServer::Slave(slave) => slave.get_server_state(),
+            RedisServer::Master(master) => master.get_server_state().await,
+            RedisServer::Slave(slave) => slave.get_server_state().await,
         }
     }
 
-    pub fn as_broadcaster(&mut self) -> Option<SharedMut<&mut dyn CanBroadcast>> {
+    pub async fn get_replication_msg_sender(
+        &self,
+    ) -> Option<&tokio::sync::mpsc::Sender<ReplicationMsg<W>>> {
         match self {
-            RedisServer::Master(master) => {
-                Some(Arc::new(Mutex::new(master as &mut dyn CanBroadcast)))
-            }
+            RedisServer::Master(master) => Some(&master.replication_msg_sender),
             RedisServer::Slave(_) => None,
         }
     }
@@ -88,7 +397,6 @@ impl RedisServer {
 pub struct MasterState {
     pub replid: String,
     pub current_offset: usize,
-    pub replicas: Vec<ReplicaConnection>,
 }
 
 // Slave-specific state
@@ -98,7 +406,7 @@ pub struct SlaveState {
     pub master_repl_offset: usize,
     pub master_host: String,
     pub master_port: String,
-    pub connection: Option<TcpStream>,
+    pub connection: Option<Arc<Mutex<TcpStream>>>,
 }
 
 #[derive(Debug)]
@@ -110,14 +418,24 @@ pub struct ReplicaConnection {
 pub type SharedMut<T> = Arc<Mutex<T>>;
 pub type Shared<T> = Arc<T>;
 
+pub type BoxedAsyncWrite = Box<dyn AsyncWrite + Unpin + Send>;
+
 #[derive(Debug, Clone)]
-pub struct MasterServer {
-    config: Shared<ServerConfig>,
-    state: SharedMut<MasterState>,
-    cache: SharedMut<Cache>,
+pub enum ReplicationMsg<W: AsyncWrite + Send + Unpin + 'static> {
+    Broadcast(Vec<u8>),
+    AddReplica(SocketAddr, SharedMut<W>),
+    RemoveReplica(SocketAddr),
 }
 
-impl MasterServer {
+#[derive(Debug, Clone)]
+pub struct MasterServer<W: AsyncWrite + Send + Unpin + 'static> {
+    config: Shared<ServerConfig>,
+    cache: SharedMut<Cache>,
+    replication_msg_sender: Sender<ReplicationMsg<W>>, // channel to send all that concerns replicaion nodes
+    state: SharedMut<MasterState>,
+}
+
+impl<W: AsyncWrite + Send + Unpin> MasterServer<W> {
     fn new() -> Self {
         let config = Arc::new(ServerConfig {
             dir: None,
@@ -128,13 +446,50 @@ impl MasterServer {
         let state = Arc::new(Mutex::new(MasterState {
             replid: "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb".to_string(),
             current_offset: 0,
-            replicas: vec![],
         }));
 
         let cache = Arc::new(Mutex::new(HashMap::new()));
 
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ReplicationMsg<W>>(256);
+
+        tokio::spawn(async move {
+            let mut replicas: HashMap<SocketAddr, SharedMut<W>> = HashMap::new();
+
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    ReplicationMsg::Broadcast(cmd) => {
+                        // ... logs ...
+                        for writer in replicas.values_mut() {
+                            let mut writer_guard = writer.lock().await;
+                            if let Err(e) = writer_guard.write_all(&cmd).await {
+                                eprintln!("Failed to write to replica: {}", e);
+                                // Optionally, handle the error by removing the replica
+                                continue;
+                            }
+                            // Flush the buffer to ensure the command is sent immediately
+                            if let Err(e) = writer_guard.flush().await {
+                                eprintln!("Failed to flush to replica: {}", e);
+                            }
+                            println!(
+                                "Replication handler wrote {} bytes command successfully",
+                                cmd.len()
+                            );
+                        }
+                    }
+                    ReplicationMsg::AddReplica(addr, stream_writer) => {
+                        println!("Adding new replica: {}", addr);
+                        replicas.insert(addr, stream_writer);
+                    }
+                    ReplicationMsg::RemoveReplica(addr) => {
+                        replicas.remove(&addr);
+                    }
+                }
+            }
+        });
+
         Self {
             config,
+            replication_msg_sender: tx,
             state,
             cache,
         }
@@ -144,39 +499,16 @@ impl MasterServer {
         &self.config.port
     }
 
-    pub fn broadcast_command(&mut self, command: &[u8]) {
-        let mut state = self.state.lock().unwrap();
-
-        state.replicas.retain(|replica| {
-            let mut conn = replica.connection.lock().unwrap();
-            if let Err(e) = conn.write_all(command) {
-                eprintln!("Failed to send to replica {}: {}", replica.port, e);
-                false // Drop dead connections
-            } else {
-                true
-            }
-        })
+    pub async fn get_repl_offset(&self) -> usize {
+        self.state.lock().await.current_offset
     }
 
-    pub fn add_replica(&self, replica_addr: SocketAddr, connection: Arc<Mutex<TcpStream>>) {
-        let replica = ReplicaConnection {
-            port: replica_addr.port().to_string(),
-            connection,
-        };
-
-        self.state.lock().unwrap().replicas.push(replica);
+    pub async fn increment_repl_offset(&self, amount: usize) {
+        self.state.lock().await.current_offset += amount;
     }
 
-    pub fn get_repl_offset(&self) -> usize {
-        self.state.lock().unwrap().current_offset
-    }
-
-    pub fn increment_repl_offset(&self, amount: usize) {
-        self.state.lock().unwrap().current_offset += amount;
-    }
-
-    pub fn get_replid(&self) -> String {
-        self.state.lock().unwrap().replid.clone()
+    pub async fn get_replid(&self) -> String {
+        self.state.lock().await.replid.clone()
     }
 }
 
@@ -266,284 +598,24 @@ impl SlaveServer {
         }
     }
 
-    pub fn increment_repl_offset(&mut self, amount: usize) {
-        self.state.lock().unwrap().master_repl_offset += amount;
-    }
-
-    fn connect(&self) -> Result<TcpStream, std::io::Error> {
-        let state = self.state.lock().unwrap();
-        let master_address = format!("{}:{}", state.master_host, state.master_port);
-        TcpStream::connect(master_address)
-    }
-
-    fn handshake(&mut self) -> Result<(), String> {
-        match self.connect() {
-            Ok(mut stream) => {
-                let mut buffer = [0; 1024];
-
-                let mut send_command = |command: &[u8], read: bool| -> Result<(), String> {
-                    stream
-                        .write_all(command)
-                        .map_err(|e| format!("Failed to send: {}", e))?;
-
-                    if read {
-                        match stream.read(&mut buffer) {
-                            Ok(0) | Err(_) => return Ok(()), // connection closed or error
-                            Ok(_) => {
-                                println!("Recieved some bytes here!");
-                                Ok(())
-                            }
-                        }
-                    } else {
-                        Ok(())
-                    }
-                };
-
-                // Step1: PING
-                send_command(&resp_bytes!(array => [resp!(bulk "PING")]), true)?;
-
-                let port = self.config.port.clone();
-                // Step2: REPLCONF listening-port <PORT>
-                send_command(
-                    &resp_bytes!(array => [
-                        resp!(bulk "REPLCONF"),
-                        resp!(bulk "listening-port"),
-                        resp!(bulk port)
-                    ]),
-                    true,
-                )?;
-
-                // Step3: REPLCONF capa psync2
-                send_command(
-                    &resp_bytes!(array => [
-                        resp!(bulk "REPLCONF"),
-                        resp!(bulk "capa"),
-                        resp!(bulk "psync2")
-                    ]),
-                    true,
-                )?;
-
-                // Step 4: PSYNC <REPL_ID> <REPL_OFFSSET>
-                send_command(
-                    &resp_bytes!(array => [
-                        resp!(bulk "PSYNC"),
-                        resp!(bulk "?"),
-                        resp!(bulk "-1")
-                    ]),
-                    false,
-                )?;
-
-                // Step 5: Read FULLRESYNC response
-                let bytes_read = stream
-                    .read(&mut buffer)
-                    .map_err(|e| format!("Failed to read FULLRESYNC: {}", e))?;
-                let (parsed, mut rest) = parse(&buffer[..bytes_read])
-                    .map_err(|e| format!("Failed to parse FULLRESYNC: {:?}", e))?;
-                match parsed {
-                    RespType::SimpleString(s) if s.starts_with("FULLRESYNC") => {
-                        // Expected response
-                    }
-                    _ => return Err("Invalid FULLRESYNC response".to_string()),
-                }
-
-                println!("rest: {:?}", rest);
-
-                println!("FULLRESYNC response bytes read: {}", bytes_read);
-
-                // So there is an interesting behaviour where the FULLRESYNC + RDB and if you are
-                // really lucky the REPLCONF would all get sent in one TCP segment so I should
-                // assume I would get nice segments refelecting each command
-                if !rest.is_empty() {
-                    // TODO: Sync the rdb_file with the slave's cache
-                    // TODO: Find a way to propagate the error up the stack by using anyhow or something
-                    let (rdb_file, bytes_consumed) = RDBFile::from_bytes(rest).unwrap();
-                    rest = &rest[bytes_consumed..];
-                    println!("rdb bytes: {}", bytes_consumed);
-                    println!("remaining btyes after rdb: {}", rest.len());
-                }
-
-                // Store the persistent connection
-                self.state.lock().unwrap().connection = Some(stream);
-                self.start_replication_listener(&mut rest);
-
-                Ok(())
-            }
-            Err(e) => Err(format!("Master node doesn't exist: {}", e)),
-        }
-    }
-
-    // TODO: This should return a Result
-    fn start_replication_listener<'a>(&'a self, rest: &mut &[u8]) {
-        let state = self.state.clone();
-        let cache = self.cache.clone();
-        let config = self.config.clone();
-        let server_state = self.get_server_state();
-        let broadcaster = None::<Arc<Mutex<&mut dyn CanBroadcast>>>;
-
-        // if it's not empty then there is probably a REPLCONF command sent and I should handle it
-        // before reading anymore bytes
-        if !rest.is_empty() {
-            // TODO: Sync the rdb_file with the slave's cache
-            // TODO: Find a way to propagate the error up the stack by using anyhow or something
-            if rest[0] == '$' as u8 {
-                // this means that the rdb segment got in here some how so I have to deal with it here
-                let (rdb_file, bytes_consumed) = RDBFile::from_bytes(rest).unwrap();
-                *rest = &rest[bytes_consumed..];
-
-                println!("rdb bytes: {}", bytes_consumed);
-                println!("remaining btyes after rdb: {}", rest.len());
-                if rest.len() > 0 {
-                    match parse(rest) {
-                        Ok((resp, leftover)) => {
-                            dbg!(&resp, leftover);
-
-                            // Update replication offset
-                            let command_size = resp.to_resp_bytes().len();
-                            let mut state_guard = state.lock().unwrap();
-
-                            let command = RedisCommand::from(resp);
-
-                            let response = command.execute(
-                                cache.clone(),
-                                config.clone(),
-                                server_state.clone(),
-                                broadcaster.clone(),
-                            );
-
-                            if let Some(ref mut stream) = state_guard.connection {
-                                let _ = stream.write_all(&response);
-                                let _ = stream.flush();
-                            }
-
-                            state_guard.master_repl_offset += command_size;
-                        }
-                        Err(_) => {}
-                    }
-                }
-            } else {
-                match parse(rest) {
-                    Ok((resp, leftover)) => {
-                        dbg!(&resp, leftover);
-
-                        // Update replication offset
-                        let command_size = resp.to_resp_bytes().len();
-                        let mut state_guard = state.lock().unwrap();
-
-                        let command = RedisCommand::from(resp);
-
-                        let response = command.execute(
-                            cache.clone(),
-                            config.clone(),
-                            server_state.clone(),
-                            broadcaster.clone(),
-                        );
-
-                        if let Some(ref mut stream) = state_guard.connection {
-                            let _ = stream.write_all(&response);
-                            let _ = stream.flush();
-                        }
-
-                        state_guard.master_repl_offset += command_size;
-                    }
-                    Err(_) => {}
-                }
-            }
-        }
-
-        // Spawn the background listener thread
-        thread::spawn(move || {
-            let mut buffer = [0u8; 1024];
-            loop {
-                let bytes_read = {
-                    let mut state_guard = state.lock().unwrap();
-                    if let Some(ref mut stream) = state_guard.connection {
-                        match stream.read(&mut buffer) {
-                            Ok(0) => {
-                                println!("Master disconnected");
-                                break;
-                            }
-                            Ok(n) => n,
-                            Err(e) => {
-                                eprintln!("Error reading from master: {}", e);
-                                break;
-                            }
-                        }
-                    } else {
-                        break;
-                    }
-                };
-
-                println!("After handshake: {}", bytes_read);
-
-                // Parse and execute all commands in the buffer
-                let mut remaining_bytes = &buffer[..bytes_read];
-
-                println!("remaining_bytes: {:?}", &remaining_bytes);
-
-                // TODO: Sync the rdb_file with the slave's cache
-                // TODO: Find a way to propagate the error up the stack by using anyhow or something
-                if remaining_bytes.len() > 0 && remaining_bytes[0] == '$' as u8 {
-                    // this means that the rdb segment got in here some how so I have to deal with it here
-                    let (rdb_file, bytes_consumed) = RDBFile::from_bytes(remaining_bytes).unwrap();
-                    println!("rdb bytes: {}", bytes_consumed);
-                    remaining_bytes = &remaining_bytes[bytes_consumed..];
-                    println!(
-                        "remaining btyes length after rdb: {}",
-                        remaining_bytes.len()
-                    );
-                    println!("remaining btyes after rdb: {:?}", remaining_bytes);
-                }
-
-                while !remaining_bytes.is_empty() {
-                    match parse(remaining_bytes) {
-                        Ok((resp, leftover)) => {
-                            dbg!(&resp, leftover);
-
-                            // Update replication offset
-                            let command_size = resp.to_resp_bytes().len();
-                            let mut state_guard = state.lock().unwrap();
-
-                            let command = RedisCommand::from(resp);
-
-                            let response = command.execute(
-                                cache.clone(),
-                                config.clone(),
-                                server_state.clone(),
-                                broadcaster.clone(),
-                            );
-
-                            if let Some(ref mut stream) = state_guard.connection {
-                                let _ = stream.write_all(&response);
-                                let _ = stream.flush();
-                            }
-
-                            state_guard.master_repl_offset += command_size;
-
-                            remaining_bytes = leftover
-                        }
-                        Err(_) => {
-                            // If parsing fails, break out of the loop
-                            break;
-                        }
-                    }
-                }
-            }
-        });
+    pub async fn increment_repl_offset(&mut self, amount: usize) {
+        self.state.lock().await.master_repl_offset += amount;
     }
 }
 
 #[derive(Debug, Clone)]
-pub enum RedisServer {
-    Master(MasterServer),
+pub enum RedisServer<W: AsyncWrite + Send + Unpin + 'static> {
+    Master(MasterServer<W>),
     Slave(SlaveServer),
 }
 
-impl RedisServer {
-    pub fn master() -> Self {
-        RedisServer::Master(MasterServer::new())
+impl<W: AsyncWrite + Send + Unpin + 'static> RedisServer<W> {
+    pub fn new_master() -> Self {
+        let master = RedisServer::Master(MasterServer::new());
+        master
     }
 
-    pub fn slave(port: String, master_host: String, master_port: String) -> Self {
+    pub fn new_slave(port: String, master_host: String, master_port: String) -> Self {
         RedisServer::Slave(SlaveServer::new(port, master_host, master_port))
     }
 
@@ -552,13 +624,6 @@ impl RedisServer {
         match self {
             RedisServer::Master(master) => &master.config.port,
             RedisServer::Slave(slave) => &slave.config.port,
-        }
-    }
-
-    pub fn config(&self) -> Arc<ServerConfig> {
-        match self {
-            RedisServer::Master(master) => master.config.clone(),
-            RedisServer::Slave(slave) => slave.config.clone(),
         }
     }
 
@@ -640,20 +705,6 @@ impl RedisServer {
         }
     }
 
-    pub fn cache(&self) -> &SharedMut<Cache> {
-        match self {
-            RedisServer::Master(master) => &master.cache,
-            RedisServer::Slave(slave) => &slave.cache,
-        }
-    }
-
-    pub fn repl_offset(&self) -> usize {
-        match self {
-            RedisServer::Master(master) => master.state.lock().unwrap().current_offset,
-            RedisServer::Slave(slave) => slave.state.lock().unwrap().master_repl_offset,
-        }
-    }
-
     pub fn set_cache(&mut self, cache: &SharedMut<Cache>) {
         match self {
             RedisServer::Master(master) => master.cache = cache.clone(),
@@ -661,67 +712,39 @@ impl RedisServer {
         }
     }
 
-    pub fn set_repl_offset(&mut self, repl_offset: usize) {
+    pub async fn repl_offset(&self) -> usize {
+        match self {
+            RedisServer::Master(master) => master.state.lock().await.current_offset,
+            RedisServer::Slave(slave) => slave.state.lock().await.master_repl_offset,
+        }
+    }
+
+    pub async fn set_repl_offset(&mut self, repl_offset: usize) {
         match self {
             RedisServer::Master(master) => {
-                master.state.lock().unwrap().current_offset = repl_offset;
+                master.state.lock().await.current_offset = repl_offset;
             }
-            RedisServer::Slave(slave) => {
-                slave.state.lock().unwrap().master_repl_offset = repl_offset
-            }
+            RedisServer::Slave(slave) => slave.state.lock().await.master_repl_offset = repl_offset,
         }
     }
 
-    pub fn repl_offset_increment(&mut self, amount: usize) {
+    pub async fn repl_offset_increment(&mut self, amount: usize) {
         match self {
-            RedisServer::Master(master) => master.state.lock().unwrap().current_offset += amount,
-            RedisServer::Slave(slave) => slave.state.lock().unwrap().master_repl_offset += amount,
+            RedisServer::Master(master) => master.state.lock().await.current_offset += amount,
+            RedisServer::Slave(slave) => slave.state.lock().await.master_repl_offset += amount,
         }
-    }
-
-    pub fn role(&self) -> &str {
-        match self {
-            RedisServer::Master(_) => "master",
-            RedisServer::Slave(_) => "slave",
-        }
-    }
-
-    pub fn add_replica(&mut self, replica_adr: SocketAddr, connection: Arc<Mutex<TcpStream>>) {
-        match self {
-            // TODO: Should probably add host to MasterServer and SlaveServer as member field
-            RedisServer::Master(master) => {
-                master.add_replica(replica_adr, connection);
-            }
-            RedisServer::Slave(_) => {
-                unreachable!("Slaves don't have replicas")
-            }
-        }
-    }
-
-    pub fn broadcast_command(&mut self, command: &[u8]) {
-        if let RedisServer::Master(master) = self {
-            master.broadcast_command(command);
-        }
-    }
-
-    pub fn is_master(&self) -> bool {
-        matches!(self, RedisServer::Master(_))
-    }
-
-    pub fn is_slave(&self) -> bool {
-        matches!(self, RedisServer::Slave(_))
     }
 }
 
-impl RedisServer {
-    pub fn new() -> Result<Option<RedisServer>, String> {
+impl<W: AsyncWrite + Send + Unpin + 'static> RedisServer<W> {
+    pub async fn new() -> Result<Option<RedisServer<W>>, String> {
         let args: Vec<String> = env::args().collect();
 
         if args.len() == 1 {
             return Ok(None);
         }
 
-        let mut redis_server = RedisServer::master();
+        let mut redis_server = RedisServer::new_master();
         let mut dir = None;
         let mut dbfilename = None;
 
@@ -764,15 +787,15 @@ impl RedisServer {
                     let current_port = redis_server.port().to_string();
 
                     // Create new slave server
-                    redis_server = RedisServer::slave(
+                    redis_server = RedisServer::new_slave(
                         current_port,
                         master_host.to_string(),
                         master_port.to_string(),
                     );
 
                     // Perform handshake
-                    if let RedisServer::Slave(mut slave) = redis_server.clone() {
-                        slave.handshake()?;
+                    if let RedisServer::Slave(ref mut slave) = redis_server {
+                        slave.handshake().await?;
                     }
 
                     i += 2;

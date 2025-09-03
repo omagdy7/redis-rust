@@ -5,31 +5,38 @@ use std::{
     env,
     fmt::format,
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
-    sync::{Arc, Mutex},
+    net::SocketAddr,
+    sync::Arc,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use anyhow::{Context, Result};
 use codecrafters_redis::{
     rdb::{KeyExpiry, ParseError, RDBFile, RedisValue},
     resp_bytes,
-    server::SharedMut,
+    server::{RedisNode, SharedMut},
     shared_cache::*,
 };
 use codecrafters_redis::{resp_commands::RedisCommand, server::RedisServer};
 use codecrafters_redis::{
-    resp_parser::{parse, RespType},
+    resp_parser::{RespType, parse},
     server::SlaveServer,
 };
+use tokio::io::{AsyncWrite, ReadHalf, WriteHalf};
+use tokio::sync::Mutex;
+use tokio::{io::AsyncReadExt, net::TcpStream};
+use tokio::{io::AsyncWriteExt, spawn};
 
-fn spawn_cleanup_thread(cache: SharedMut<Cache>) {
+// responsible for periodically removing expired keys from database
+fn spawn_cleanup_task(cache: SharedMut<Cache>) {
     let cache_clone = cache.clone();
-    std::thread::spawn(move || {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
         loop {
-            std::thread::sleep(Duration::from_secs(10)); // Check every 10 seconds
+            interval.tick().await; // Wait for the next tick (10 seconds)
 
-            let mut cache = cache_clone.lock().unwrap();
+            let mut cache = cache_clone.lock().await;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -41,9 +48,11 @@ fn spawn_cleanup_thread(cache: SharedMut<Cache>) {
     });
 }
 
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 
-fn write_rdb_to_stream<W: Write>(writer: &mut W) -> Result<(), Box<dyn std::error::Error>> {
+fn write_rdb_to_stream<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+) -> Result<(), Box<dyn std::error::Error>> {
     let hardcoded_rdb = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
 
     let bytes = general_purpose::STANDARD.decode(hardcoded_rdb)?;
@@ -52,96 +61,59 @@ fn write_rdb_to_stream<W: Write>(writer: &mut W) -> Result<(), Box<dyn std::erro
     response.extend_from_slice(&bytes);
 
     // Write the binary RDB data
-    writer.write_all(&response)?;
+    let _ = writer.write_all(&response);
 
     Ok(())
 }
 
 // TODO: This should return a Result to handle the plethora of different errors
-fn handle_client(mut stream: TcpStream, server: Arc<Mutex<RedisServer>>) {
-    let mut buffer = [0; 512];
+async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
+    mut reader: ReadHalf<TcpStream>, // Takes ownership of the reader
+    writer: SharedMut<W>,            // Takes the shared writer
+    socket_addr: SocketAddr,
+    server: SharedMut<RedisServer<W>>,
+) -> Result<()> {
+    let mut buffer = [0; 1024];
 
     loop {
-        let _ = match stream.read(&mut buffer) {
-            Ok(0) => return, // connection closed
+        let n = match reader.read(&mut buffer).await {
+            Ok(0) => return Ok(()), // connection closed
             Ok(n) => n,
-            Err(_) => return, // error occurred
+            Err(e) => return Err(e).context("error occurred while reading from stream"),
         };
 
-        let request = parse(&buffer).unwrap();
+        let (request, left_bytes) = parse(&buffer[..n]).context("failed to parse request")?;
+        assert!(left_bytes.is_empty());
 
-        let mut server = server.lock().unwrap();
+        let server_instance = server.lock().await;
 
         // Big State vars
-        let cache = server.cache().clone();
-        let server_state = server.get_server_state().clone();
-        let config = server.config();
-        let brodcaster = server.as_broadcaster();
+        let cache = server_instance.cache().clone();
+        let server_state = server_instance.get_server_state().await.clone();
+        let sender = server_instance.get_replication_msg_sender().await;
+        let config = server_instance.config();
 
-        let response = RedisCommand::from(request.0.clone()).execute(
-            cache.clone(),
-            config,
-            server_state,
-            brodcaster,
-        );
-
-        let mut request_command = "".to_string();
-
-        // FIXME: Find a solution for this mess!! (Design better API)
-        match &request.0 {
-            RespType::Array(arr) => {
-                if let RespType::BulkString(s) = arr[0].clone() {
-                    request_command = String::from_utf8(s).unwrap();
-                }
-            }
-            _ => {}
-        }
-
-        // Store the persistent connection
-        // let shared_stream = Arc::new(Mutex::new(
-        //     stream.try_clone().expect("What could go wrong? :)"),
-        // ));
-
-        // if this true immediately write and send back rdb file after response
-        // HACK: This just feels wrong I feel this shouldn't be handled here and should be handled
-        // in the exexute command
-        if request_command.starts_with("PSYNC") {
-            stream.write(&response).unwrap();
-            let replica_addr = stream
-                .peer_addr()
-                .expect("This shouldn't fail right? right?? :)");
-
-            server.add_replica(
-                replica_addr,
-                Arc::new(Mutex::new(
-                    stream.try_clone().expect("What could go wrong? :)"),
-                )),
-            );
-
-            let _ = write_rdb_to_stream(&mut stream);
-            // handshake completed and I should add the server sending me the handshake to my replicas
-        } else {
-            // write respose back to the client
-            stream.write(&response).unwrap();
-        }
+        let command = RedisCommand::from(request.clone());
+        // Pass the writer to the execute function
+        let _response = command
+            .execute(
+                writer.clone(),
+                socket_addr,
+                sender,
+                cache,
+                config,
+                server_state,
+            )
+            .await;
     }
 }
 
-fn main() -> std::io::Result<()> {
-    let server = match RedisServer::new() {
-        Ok(Some(server)) => server,
-        Ok(None) => RedisServer::master(), // Default to master if no args
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
-
+async fn load_rdb<W: AsyncWrite + Send + Unpin + 'static>(server: &RedisServer<W>) {
     // Load RDB file if dir and dbfilename are provided
     if let (Some(dir), Some(dbfilename)) = (server.dir().clone(), server.dbfilename().clone()) {
         if let Ok(rdb_file) = RDBFile::read(dir, dbfilename) {
             if let Some(rdb) = rdb_file {
-                let mut cache = server.cache().lock().unwrap();
+                let mut cache = server.cache().lock().await;
                 let hash_table = &rdb.databases.get(&0).unwrap().hash_table;
 
                 for (key, db_entry) in hash_table.iter() {
@@ -163,21 +135,45 @@ fn main() -> std::io::Result<()> {
             }
         }
     }
+}
 
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let server: RedisServer<WriteHalf<TcpStream>> = match RedisServer::new().await {
+        Ok(Some(server)) => server,
+        Ok(None) => RedisServer::new_master(), // Default to master if no args
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    println!("Server created and its role is {}", server.role());
+
+    load_rdb(&server).await;
     let port = server.port().to_string();
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).unwrap();
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
 
-    spawn_cleanup_thread(server.cache().clone());
-
+    spawn_cleanup_task(server.cache().clone());
     let server = Arc::new(Mutex::new(server));
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _addr)) => {
                 let server_clone = Arc::clone(&server);
-                // TODO: Use tokio instead of multi threads to handle multiple clients
-                thread::spawn(|| {
-                    handle_client(stream, server_clone);
+                let socket_addr = stream.peer_addr().unwrap();
+
+                // Split the stream into a reader and a writer
+                let (reader, writer) = tokio::io::split(stream);
+                let shared_writer = Arc::new(Mutex::new(writer));
+
+                tokio::spawn(async move {
+                    // Pass the reader and the shared writer to the handler
+                    if let Err(e) =
+                        handle_client(reader, shared_writer, socket_addr, server_clone).await
+                    {
+                        eprintln!("Error handling client: {}", e);
+                    }
                 });
             }
             Err(e) => {
@@ -185,5 +181,4 @@ fn main() -> std::io::Result<()> {
             }
         }
     }
-    Ok(())
 }
