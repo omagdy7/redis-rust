@@ -2,6 +2,8 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    error::Error,
+    fmt,
     fmt::format,
     io::Read,
     isize,
@@ -197,6 +199,14 @@ impl RespError {
         }
     }
 }
+
+impl fmt::Display for RespError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message())
+    }
+}
+
+impl Error for RespError {}
 
 pub fn parse_simple_strings(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
     match bytes {

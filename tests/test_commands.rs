@@ -151,13 +151,12 @@ mod command_execution_tests {
     /// Helper to parse and execute a command against a cache.
     fn run_command(cache: &SharedMut<Cache>, args: &[&str]) -> Vec<u8> {
         let command = RedisCommand::from(build_command_from_str_slice(args));
-        let mut server = RedisServer::master();
+        let mut server = RedisServer::new_master();
         server.set_cache(cache);
         let config = server.config();
         let state = server.get_server_state();
-        let broadcaster = None::<Arc<Mutex<&mut dyn CanBroadcast>>>;
 
-        command.execute(cache.clone(), config, state, broadcaster)
+        command.execute(tokio::net::TcpStream::, server.get_replication_msg_sender(), cache.clone(), config, state)
     }
 
     #[test]
