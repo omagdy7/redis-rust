@@ -149,6 +149,7 @@ impl RedisCommand {
         cache: SharedMut<Cache>,
         config: Shared<ServerConfig>,
         server_state: ServerState,
+        master_repl_offset: usize,
     ) -> Vec<u8> {
         use RedisCommand as RC;
         match self {
@@ -319,7 +320,7 @@ impl RedisCommand {
                 let response = match (op1.to_uppercase().as_str(), op2.as_str()) {
                     ("GETACK", "*") => {
                         println!("Did i even get here?");
-                        resp_bytes!(array => [resp!(bulk "REPLCONF"), resp!(bulk "ACK"), resp!(bulk server_state.repl_offset.to_string())])
+                        resp_bytes!(array => [resp!(bulk "REPLCONF"), resp!(bulk "ACK"), resp!(bulk master_repl_offset.to_string())])
                     }
                     _ => resp_bytes!("OK"),
                 };

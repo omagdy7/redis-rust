@@ -134,7 +134,9 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
                 )
             };
 
-            let response = command.execute(sender, cache, config, server_state).await;
+            let response = command
+                .execute(sender, cache, config, server_state, 0)
+                .await;
 
             if !response.is_empty() {
                 writer.lock().await.write_all(&response).await?;
