@@ -121,6 +121,7 @@ pub enum RedisCommand {
     Info(String),
     ReplConf((String, String)),
     Psync((String, String)),
+    Wait((String, String)),
     Invalid,
 }
 
@@ -339,6 +340,9 @@ impl RedisCommand {
                     }
                 }
             }
+            RC::Wait((_no_replicas, _time_in_ms)) => {
+                resp_bytes!(int 0)
+            }
             RC::Invalid => {
                 let response = resp_bytes!(error "ERR Invalid Command");
                 response
@@ -531,6 +535,15 @@ impl From<RespType> for RedisCommand {
                     return Self::Invalid;
                 };
                 Self::ReplConf((op1, op2))
+            }
+            "WAIT" => {
+                let Some(op1) = args.next() else {
+                    return Self::Invalid;
+                };
+                let Some(op2) = args.next() else {
+                    return Self::Invalid;
+                };
+                Self::Wait((op1, op2))
             }
             "PSYNC" => {
                 let Some(repl_id) = args.next() else {
