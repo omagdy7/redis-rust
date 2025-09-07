@@ -604,14 +604,12 @@ impl FromBytes for RDBFile {
         // $<length>/r/n<bytes_of_length_length>
         if bytes[0] == '$' as u8 {
             // consume up to the CRLF
-            let (consumed, rest) = bytes
+            let pos = bytes
                 .windows(2)
                 .position(|window| window == b"\r\n")
-                .map(|pos| (&bytes[..pos], &bytes[pos + 2..]))
                 .ok_or(ParseError::UnexpectedEof)?;
-            println!("Consumed {:?}", consumed);
-            remaining = rest;
-            total_consumed += consumed.len();
+            remaining = &bytes[pos + 2..];
+            total_consumed += pos + 2; // include CRLF
         }
 
         // 1. Parse the RDB header ("REDIS" + version)
@@ -662,8 +660,6 @@ impl FromBytes for RDBFile {
             };
             Ok((rdb_file, total_consumed))
         } else {
-            // Handle cases where checksum might be missing (older RDB versions or truncated file)
-            // For simplicity, we'll assume a checksum is always present.
             Err(ParseError::UnexpectedEof)
         }
     }

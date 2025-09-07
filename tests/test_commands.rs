@@ -156,7 +156,13 @@ mod command_execution_tests {
         let config = server.config();
         let state = server.get_server_state();
 
-        command.execute(tokio::net::TcpStream::, server.get_replication_msg_sender(), cache.clone(), config, state)
+        command.execute(
+            None,
+            server.get_replication_msg_sender(),
+            cache.clone(),
+            config,
+            state,
+        )
     }
 
     #[test]

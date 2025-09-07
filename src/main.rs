@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use codecrafters_redis::{
     rdb::{KeyExpiry, ParseError, RDBFile, RedisValue},
     resp_bytes,
-    server::{RedisNode, SharedMut},
+    server::{RedisNode, ReplicationMsg, ServerRole, SharedMut},
     shared_cache::*,
 };
 use codecrafters_redis::{resp_commands::RedisCommand, server::RedisServer};
@@ -50,7 +50,7 @@ fn spawn_cleanup_task(cache: SharedMut<Cache>) {
 
 use base64::{Engine as _, engine::general_purpose};
 
-fn write_rdb_to_stream<W: AsyncWriteExt + Unpin>(
+async fn send_empty_rdb<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let hardcoded_rdb = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
@@ -61,15 +61,15 @@ fn write_rdb_to_stream<W: AsyncWriteExt + Unpin>(
     response.extend_from_slice(&bytes);
 
     // Write the binary RDB data
-    let _ = writer.write_all(&response);
+    let _ = writer.write_all(&response).await;
 
     Ok(())
 }
 
 // TODO: This should return a Result to handle the plethora of different errors
 async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
-    mut reader: ReadHalf<TcpStream>, // Takes ownership of the reader
-    writer: SharedMut<W>,            // Takes the shared writer
+    mut reader: ReadHalf<TcpStream>,
+    writer: SharedMut<W>,
     socket_addr: SocketAddr,
     server: SharedMut<RedisServer<W>>,
 ) -> Result<()> {
@@ -85,26 +85,61 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
         let (request, left_bytes) = parse(&buffer[..n]).context("failed to parse request")?;
         assert!(left_bytes.is_empty());
 
-        let server_instance = server.lock().await;
-
-        // Big State vars
-        let cache = server_instance.cache().clone();
-        let server_state = server_instance.get_server_state().await.clone();
-        let sender = server_instance.get_replication_msg_sender().await;
-        let config = server_instance.config();
-
         let command = RedisCommand::from(request.clone());
-        // Pass the writer to the execute function
-        let _response = command
-            .execute(
-                writer.clone(),
-                socket_addr,
-                sender,
-                cache,
-                config,
-                server_state,
-            )
-            .await;
+
+        // Special handling for PSYNC ---
+        if let RedisCommand::Psync(_) = command {
+            let (server_state, sender) = {
+                let server_instance = server.lock().await;
+                (
+                    server_instance.get_server_state().await,
+                    server_instance.get_replication_msg_sender().await,
+                )
+            };
+
+            if server_state.role == ServerRole::Master {
+                // Fulfill the master side of the handshake
+                let response_str = format!("FULLRESYNC {} 0", server_state.repl_id);
+                let full_resync_response = resp_bytes!(response_str);
+
+                // Add this connection to the list of replicas
+                sender
+                    .unwrap() // Safe to unwrap; we are in the Master role
+                    .send(ReplicationMsg::AddReplica(socket_addr, writer.clone()))
+                    .await
+                    .context("Failed to add replica")?;
+
+                // Lock the writer to send the multi-part response
+                let mut writer_guard = writer.lock().await;
+                writer_guard.write_all(&full_resync_response).await?;
+                let _ = send_empty_rdb(&mut *writer_guard).await.unwrap();
+                writer_guard.flush().await?;
+            } else {
+                // A slave should not receive a PSYNC command from a client
+                let response = resp_bytes!(error "ERR PSYNC not supported on slave");
+                writer.lock().await.write_all(&response).await?;
+            }
+
+            // Skip the generic command handling below and wait for the next command
+            continue;
+        } else {
+            // Generic command handling for all other commands ---
+            let (cache, config, sender, server_state) = {
+                let server_instance = server.lock().await;
+                (
+                    server_instance.cache().clone(),
+                    server_instance.config(),
+                    server_instance.get_replication_msg_sender().await,
+                    server_instance.get_server_state().await,
+                )
+            };
+
+            let response = command.execute(sender, cache, config, server_state).await;
+
+            if !response.is_empty() {
+                writer.lock().await.write_all(&response).await?;
+            }
+        }
     }
 }
 
