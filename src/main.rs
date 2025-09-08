@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use codecrafters_redis::{
     rdb::{KeyExpiry, ParseError, RDBFile, RedisValue},
     resp_bytes,
-    server::{RedisNode, ReplicationMsg, ServerRole, SharedMut},
+    server::{ReplicationMsg, ServerRole, ServerState, ServerStateTrait, SharedMut},
     shared_cache::*,
 };
 use codecrafters_redis::{resp_commands::RedisCommand, server::RedisServer};
@@ -92,14 +92,14 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
             let (server_state, sender) = {
                 let server_instance = server.lock().await;
                 (
-                    server_instance.get_server_state().await,
+                    server_instance.get_server_state_owned(),
                     server_instance.get_replication_msg_sender().await,
                 )
             };
 
-            if server_state.role == ServerRole::Master {
+            if let ServerState::MasterState(master) = server_state {
                 // Fulfill the master side of the handshake
-                let response_str = format!("FULLRESYNC {} 0", server_state.repl_id);
+                let response_str = format!("FULLRESYNC {} 0", master.lock().await.replid());
                 let full_resync_response = resp_bytes!(response_str);
 
                 // Add this connection to the list of replicas
@@ -124,19 +124,32 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
             continue;
         } else {
             // Generic command handling for all other commands ---
-            let (cache, config, sender, server_state) = {
+            let (sender, server_state) = {
                 let server_instance = server.lock().await;
                 (
-                    server_instance.cache().clone(),
-                    server_instance.config(),
                     server_instance.get_replication_msg_sender().await,
-                    server_instance.get_server_state().await,
+                    server_instance.get_server_state_owned(),
                 )
             };
 
-            let response = command
-                .execute(sender, cache, config, server_state, 0)
-                .await;
+            // Special handling for REPLCONF ACK if master
+            if let ServerState::MasterState(_) = server_state {
+                if let RedisCommand::ReplConf((ref op1, ref op2)) = command {
+                    if op1.to_uppercase() == "ACK" {
+                        if let Ok(offset) = op2.parse::<usize>() {
+                            if let Some(ref s) = sender {
+                                let _ =
+                                    s.send(ReplicationMsg::UpdateAck(socket_addr, offset)).await;
+                            }
+                        }
+                        // No response needed for ACK
+                        continue;
+                    }
+                }
+            }
+
+            let server_instance = server.lock().await;
+            let response = server_instance.execute(command).await;
 
             if !response.is_empty() {
                 writer.lock().await.write_all(&response).await?;
