@@ -1,30 +1,31 @@
 use codecrafters_redis::resp_parser::*;
+use codecrafters_redis::frame::Frame;
 
 #[test]
 fn test_valid_simple_errors() {
     // Basic valid cases
     assert_eq!(
         parse_simple_errors(b"-ERR unknown command\r\n").unwrap().0,
-        "ERR unknown command"
+        Frame::SimpleError("ERR unknown command".to_string())
     );
     assert_eq!(
         parse_simple_errors(b"-WRONGTYPE\r\n").unwrap().0,
-        "WRONGTYPE"
+        Frame::SimpleError("WRONGTYPE".to_string())
     );
     assert_eq!(
         parse_simple_errors(b"-ERR syntax error\r\n").unwrap().0,
-        "ERR syntax error"
+        Frame::SimpleError("ERR syntax error".to_string())
     );
 
     // Empty error string
-    assert_eq!(parse_simple_errors(b"-\r\n").unwrap().0, "");
+    assert_eq!(parse_simple_errors(b"-\r\n").unwrap().0, Frame::SimpleError("".to_string()));
 
     // Error with spaces and special characters (but no \r or \n)
     assert_eq!(
         parse_simple_errors(b"-ERR invalid key: 'test123'\r\n")
             .unwrap()
             .0,
-        "ERR invalid key: 'test123'"
+        Frame::SimpleError("ERR invalid key: 'test123'".to_string())
     );
 
     // Error with various ASCII characters
@@ -32,7 +33,7 @@ fn test_valid_simple_errors() {
         parse_simple_errors(b"-ERR !@#$%^&*()_+-={}[]|\\:;\"'<>?,./ \r\n")
             .unwrap()
             .0,
-        "ERR !@#$%^&*()_+-={}[]|\\:;\"'<>?,./ "
+        Frame::SimpleError("ERR !@#$%^&*()_+-={}[]|\\:;\"'<>?,./ ".to_string())
     );
 
     // Unicode characters in error message
@@ -40,7 +41,7 @@ fn test_valid_simple_errors() {
         parse_simple_errors(b"-ERR \xc3\xa9\xc3\xa1\xc3\xb1\r\n")
             .unwrap()
             .0,
-        "ERR éáñ"
+        Frame::SimpleError("ERR éáñ".to_string())
     );
 
     // Common Redis error patterns
@@ -48,7 +49,7 @@ fn test_valid_simple_errors() {
         parse_simple_errors(b"-NOAUTH Authentication required\r\n")
             .unwrap()
             .0,
-        "NOAUTH Authentication required"
+        Frame::SimpleError("NOAUTH Authentication required".to_string())
     );
     assert_eq!(
         parse_simple_errors(
@@ -56,7 +57,7 @@ fn test_valid_simple_errors() {
         )
         .unwrap()
         .0,
-        "WRONGTYPE Operation against a key holding the wrong kind of value"
+        Frame::SimpleError("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
     );
 }
 
@@ -130,16 +131,16 @@ fn test_invalid_simple_errors() {
 fn test_simple_error_remaining_bytes() {
     // Test that remaining bytes are correctly returned
     let (error, remaining) = parse_simple_errors(b"-ERR test\r\nnext data").unwrap();
-    assert_eq!(error, "ERR test");
+    assert_eq!(error, Frame::SimpleError("ERR test".to_string()));
     assert_eq!(remaining, b"next data");
 
     // Test with multiple commands
     let (error, remaining) = parse_simple_errors(b"-WRONGTYPE\r\n+OK\r\n").unwrap();
-    assert_eq!(error, "WRONGTYPE");
+    assert_eq!(error, Frame::SimpleError("WRONGTYPE".to_string()));
     assert_eq!(remaining, b"+OK\r\n");
 
     // Test with no remaining data
     let (error, remaining) = parse_simple_errors(b"-ERR final\r\n").unwrap();
-    assert_eq!(error, "ERR final");
+    assert_eq!(error, Frame::SimpleError("ERR final".to_string()));
     assert_eq!(remaining, b"");
 }

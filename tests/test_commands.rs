@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 use std::thread;
 use tokio;
 
-use codecrafters_redis::resp_parser::RespType;
+use codecrafters_redis::frame::Frame;
 use codecrafters_redis::server::SharedMut;
 use codecrafters_redis::shared_cache::{Cache, CacheEntry};
 
@@ -15,13 +15,13 @@ fn new_cache() -> SharedMut<Cache> {
     Arc::new(Mutex::new(Cache::new()))
 }
 
-/// Builds a `RespType::Array` from string slices to simplify parser tests.
-fn build_command_from_str_slice(args: &[&str]) -> RespType {
+/// Builds a `Frame::Array` from string slices to simplify parser tests.
+fn build_command_from_str_slice(args: &[&str]) -> Frame {
     let resp_args = args
         .iter()
-        .map(|s| RespType::BulkString(Bytes::copy_from_slice(s.as_bytes())))
+        .map(|s| Frame::BulkString(Bytes::copy_from_slice(s.as_bytes())))
         .collect();
-    RespType::Array(resp_args)
+    Frame::Array(resp_args)
 }
 
 /// A helper to get a value directly from the cache for assertions.
@@ -29,12 +29,12 @@ async fn get_from_cache(cache: &SharedMut<Cache>, key: &str) -> Option<CacheEntr
     cache.lock().await.get(key).cloned()
 }
 
-/// Tests for the `RedisCommands::from(RespType)` parser logic.
+/// Tests for the `RedisCommands::from(Frame)` parser logic.
 mod command_parser_tests {
     use codecrafters_redis::resp_commands::ExpiryOption;
     use codecrafters_redis::resp_commands::RedisCommand;
     use codecrafters_redis::resp_commands::SetCondition;
-    use codecrafters_redis::resp_parser::RespType;
+use codecrafters_redis::frame::Frame;
 
     use super::*;
 
@@ -138,7 +138,7 @@ mod command_parser_tests {
 
     #[test]
     fn test_parse_not_an_array_is_invalid() {
-        let cmd = RespType::SimpleString("SET k v".into());
+        let cmd = Frame::SimpleString("SET k v".into());
         assert!(matches!(RedisCommand::from(cmd), RedisCommand::Invalid));
     }
 }

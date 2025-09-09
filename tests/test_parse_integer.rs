@@ -1,31 +1,32 @@
 use codecrafters_redis::resp_parser::*;
+use codecrafters_redis::frame::Frame;
 
 #[test]
 fn test_valid_integers() {
     // Basic valid cases
-    assert_eq!(parse_integers(b":0\r\n").unwrap().0, 0u64);
-    assert_eq!(parse_integers(b":1\r\n").unwrap().0, 1u64);
-    assert_eq!(parse_integers(b":42\r\n").unwrap().0, 42u64);
-    assert_eq!(parse_integers(b":1000\r\n").unwrap().0, 1000u64);
+    assert_eq!(parse_integers(b":0\r\n").unwrap().0, Frame::Integer(0));
+    assert_eq!(parse_integers(b":1\r\n").unwrap().0, Frame::Integer(1));
+    assert_eq!(parse_integers(b":42\r\n").unwrap().0, Frame::Integer(42));
+    assert_eq!(parse_integers(b":1000\r\n").unwrap().0, Frame::Integer(1000));
 
-    assert_eq!(parse_integers(b":+42\r\n").unwrap().0, 42u64);
+    assert_eq!(parse_integers(b":+42\r\n").unwrap().0, Frame::Integer(42));
 
     // Large numbers
     assert_eq!(
         parse_integers(b":9223372036854775807\r\n").unwrap().0,
-        9223372036854775807u64
+        Frame::Integer(9223372036854775807)
     );
     assert_eq!(
-        parse_integers(b":18446744073709551615\r\n").unwrap().0,
-        18446744073709551615u64
-    ); // u64::MAX
+        parse_integers(b":9223372036854775807\r\n").unwrap().0,
+        Frame::Integer(9223372036854775807)
+    ); // i64::MAX
 
     // Edge cases
-    assert_eq!(parse_integers(b":123456789\r\n").unwrap().0, 123456789u64);
+    assert_eq!(parse_integers(b":123456789\r\n").unwrap().0, Frame::Integer(123456789));
 
     // Numbers with leading zeros (should still parse correctly)
-    assert_eq!(parse_integers(b":0000042\r\n").unwrap().0, 42u64);
-    assert_eq!(parse_integers(b":00000\r\n").unwrap().0, 0u64);
+    assert_eq!(parse_integers(b":0000042\r\n").unwrap().0, Frame::Integer(42));
+    assert_eq!(parse_integers(b":00000\r\n").unwrap().0, Frame::Integer(0));
 }
 
 #[test]
@@ -36,11 +37,8 @@ fn test_invalid_integers() {
         "ERR Invalid data type"
     );
 
-    // Negative numbers (not valid for u64)
-    assert_eq!(
-        parse_integers(b":-42\r\n").err().unwrap().message(),
-        "ERR invalid value"
-    );
+    // Negative numbers (now valid for i64)
+    assert_eq!(parse_integers(b":-42\r\n").unwrap().0, Frame::Integer(-42));
 
     // Non-numeric content
     assert_eq!(
@@ -145,21 +143,21 @@ fn test_invalid_integers() {
 fn test_integer_remaining_bytes() {
     // Test that remaining bytes are correctly returned
     let (integer, remaining) = parse_integers(b":42\r\nnext data").unwrap();
-    assert_eq!(integer, 42u64);
+    assert_eq!(integer, Frame::Integer(42));
     assert_eq!(remaining, b"next data");
 
     // Test with multiple commands
     let (integer, remaining) = parse_integers(b":1337\r\n+OK\r\n").unwrap();
-    assert_eq!(integer, 1337u64);
+    assert_eq!(integer, Frame::Integer(1337));
     assert_eq!(remaining, b"+OK\r\n");
 
     // Test with no remaining data
     let (integer, remaining) = parse_integers(b":999\r\n").unwrap();
-    assert_eq!(integer, 999u64);
+    assert_eq!(integer, Frame::Integer(999));
     assert_eq!(remaining, b"");
 
     // Test with zero and remaining data
     let (integer, remaining) = parse_integers(b":0\r\n-ERR test\r\n").unwrap();
-    assert_eq!(integer, 0u64);
+    assert_eq!(integer, Frame::Integer(0));
     assert_eq!(remaining, b"-ERR test\r\n");
 }

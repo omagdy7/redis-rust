@@ -1,22 +1,24 @@
 use codecrafters_redis::resp_parser::*;
+use codecrafters_redis::frame::Frame;
+use bytes::Bytes;
 
 #[test]
 fn test_valid_bulk_strings() {
     // basic valid cases
-    assert_eq!(parse_bulk_strings(b"$2\r\nok\r\n").unwrap().0, "ok");
-    assert_eq!(parse_bulk_strings(b"$4\r\npong\r\n").unwrap().0, "pong");
+    assert_eq!(parse_bulk_strings(b"$2\r\nok\r\n").unwrap().0, Frame::BulkString(Bytes::from("ok")));
+    assert_eq!(parse_bulk_strings(b"$4\r\npong\r\n").unwrap().0, Frame::BulkString(Bytes::from("pong")));
     assert_eq!(
         parse_bulk_strings(b"$11\r\nhello world\r\n").unwrap().0,
-        "hello world"
+        Frame::BulkString(Bytes::from("hello world"))
     );
 
     // empty string
-    assert_eq!(parse_bulk_strings(b"$0\r\n\r\n").unwrap().0, "");
+    assert_eq!(parse_bulk_strings(b"$0\r\n\r\n").unwrap().0, Frame::BulkString(Bytes::from("")));
 
     // string with special characters (including \r and \n - allowed in bulk strings)
     assert_eq!(
         parse_bulk_strings(b"$13\r\nhello\r\nworld!\r\n").unwrap().0,
-        "hello\r\nworld!"
+        Frame::BulkString(Bytes::from("hello\r\nworld!"))
     );
 
     // string with various ascii characters
@@ -24,26 +26,24 @@ fn test_valid_bulk_strings() {
         parse_bulk_strings(b"$30\r\n!@#$%^&*()_+-={}[]|\\:;\"'<>?,./\r\n")
             .unwrap()
             .0,
-        "!@#$%^&*()_+-={}[]|\\:;\"'<>?,./"
+        Frame::BulkString(Bytes::from("!@#$%^&*()_+-={}[]|\\:;\"'<>?,./"))
     );
 
     // large string
     let large_content = "x".repeat(1000);
     let large_bulk = format!("$1000\r\n{}\r\n", large_content);
-    if let RespType::BulkString(_) = parse_bulk_strings(large_bulk.as_bytes()).unwrap().0 {}
-
     assert_eq!(
         parse_bulk_strings(large_bulk.as_bytes()).unwrap().0,
-        large_content
+        Frame::BulkString(Bytes::from(large_content))
     );
 
     // string with only whitespace
-    assert_eq!(parse_bulk_strings(b"$3\r\n   \r\n").unwrap().0, "   ");
+    assert_eq!(parse_bulk_strings(b"$3\r\n   \r\n").unwrap().0, Frame::BulkString(Bytes::from("   ")));
 
     // string with tabs and newlines
     assert_eq!(
         parse_bulk_strings(b"$7\r\nhe\tllo\n\r\n").unwrap().0,
-        "he\tllo\n"
+        Frame::BulkString(Bytes::from("he\tllo\n"))
     );
 }
 
@@ -51,12 +51,12 @@ fn test_valid_bulk_strings() {
 fn test_null_bulk_string() {
     // Null bulk string
     let (result, remaining) = parse_bulk_strings(b"$-1\r\n").unwrap();
-    assert_eq!(result, RespType::Null());
+    assert_eq!(result, Frame::Null);
     assert_eq!(remaining, b"");
 
     // Null bulk string with remaining data
     let (result, remaining) = parse_bulk_strings(b"$-1\r\n+OK\r\n").unwrap();
-    assert_eq!(result, RespType::Null());
+    assert_eq!(result, Frame::Null);
     assert_eq!(remaining, b"+OK\r\n");
 }
 
@@ -166,22 +166,22 @@ fn test_invalid_bulk_strings() {
 fn test_bulk_string_remaining_bytes() {
     // Test that remaining bytes are correctly returned
     let (string, remaining) = parse_bulk_strings(b"$5\r\nhello\r\nnext data").unwrap();
-    assert_eq!(string, "hello");
+    assert_eq!(string, Frame::BulkString(Bytes::from("hello")));
     assert_eq!(remaining, b"next data");
 
     // Test with multiple commands
     let (string, remaining) = parse_bulk_strings(b"$4\r\ntest\r\n:42\r\n").unwrap();
-    assert_eq!(string, "test");
+    assert_eq!(string, Frame::BulkString(Bytes::from("test")));
     assert_eq!(remaining, b":42\r\n");
 
     // Test with no remaining data
     let (string, remaining) = parse_bulk_strings(b"$3\r\nend\r\n").unwrap();
-    assert_eq!(string, "end");
+    assert_eq!(string, Frame::BulkString(Bytes::from("end")));
     assert_eq!(remaining, b"");
 
     // Test null string with remaining data
     let (result, remaining) = parse_bulk_strings(b"$-1\r\n+PONG\r\n").unwrap();
-    assert_eq!(result, RespType::Null());
+    assert_eq!(result, Frame::Null);
     assert_eq!(remaining, b"+PONG\r\n");
 }
 
@@ -190,25 +190,25 @@ fn test_bulk_string_edge_cases() {
     // String that contains the exact sequence that would end it
     assert_eq!(
         parse_bulk_strings(b"$8\r\ntest\r\n\r\n\r\n").unwrap().0,
-        "test\r\n"
+        Frame::BulkString(Bytes::from("test\r\n\r\n"))
     );
 
     // String with only \r\n
-    assert_eq!(parse_bulk_strings(b"$2\r\n\r\n\r\n").unwrap().0, "\r\n");
+    assert_eq!(parse_bulk_strings(b"$2\r\n\r\n\r\n").unwrap().0, Frame::BulkString(Bytes::from("\r\n")));
 
     // String that starts with numbers
-    assert_eq!(parse_bulk_strings(b"$5\r\n12345\r\n").unwrap().0, "12345");
+    assert_eq!(parse_bulk_strings(b"$5\r\n12345\r\n").unwrap().0, Frame::BulkString(Bytes::from("12345")));
 
     // String with control characters
     assert_eq!(
         parse_bulk_strings(b"$5\r\n\x01\x02\x03\x04\x05\r\n")
             .unwrap()
             .0,
-        "\x01\x02\x03\x04\x05"
+        Frame::BulkString(Bytes::from("\x01\x02\x03\x04\x05"))
     );
 
     // Maximum length value (within reason)
     let content = "a".repeat(65535);
     let bulk = format!("$65535\r\n{}\r\n", content);
-    assert_eq!(parse_bulk_strings(bulk.as_bytes()).unwrap().0, content);
+    assert_eq!(parse_bulk_strings(bulk.as_bytes()).unwrap().0, Frame::BulkString(Bytes::from(content)));
 }

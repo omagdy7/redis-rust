@@ -1,14 +1,15 @@
 use codecrafters_redis::resp_parser::*;
+use codecrafters_redis::frame::Frame;
 
 #[test]
 fn test_valid_booleans() {
     // Basic true value
-    assert_eq!(parse_boolean(b"#t\r\n").unwrap().0, RespType::Boolean(true));
+    assert_eq!(parse_boolean(b"#t\r\n").unwrap().0, Frame::Boolean(true));
 
     // Basic false value
     assert_eq!(
         parse_boolean(b"#f\r\n").unwrap().0,
-        RespType::Boolean(false)
+        Frame::Boolean(false)
     );
 }
 
@@ -67,21 +68,21 @@ fn test_invalid_booleans() {
 fn test_boolean_remaining_bytes() {
     // Test with remaining data
     let (value, remaining) = parse_boolean(b"#t\r\n+OK\r\n").unwrap();
-    assert_eq!(value, RespType::Boolean(true));
+    assert_eq!(value, Frame::Boolean(true));
     assert_eq!(remaining, b"+OK\r\n");
 
     // Test with no remaining data
     let (value, remaining) = parse_boolean(b"#f\r\n").unwrap();
-    assert_eq!(value, RespType::Boolean(false));
+    assert_eq!(value, Frame::Boolean(false));
     assert_eq!(remaining, b"");
 
     // Test with multiple commands
     let (value, remaining) = parse_boolean(b"#t\r\n:42\r\n").unwrap();
-    assert_eq!(value, RespType::Boolean(true));
+    assert_eq!(value, Frame::Boolean(true));
     assert_eq!(remaining, b":42\r\n");
 
     // Test with false and remaining data
     let (value, remaining) = parse_boolean(b"#f\r\n-ERR test\r\n").unwrap();
-    assert_eq!(value, RespType::Boolean(false));
+    assert_eq!(value, Frame::Boolean(false));
     assert_eq!(remaining, b"-ERR test\r\n");
 }
