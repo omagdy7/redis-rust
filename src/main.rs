@@ -40,10 +40,13 @@ fn spawn_cleanup_task(cache: SharedMut<Cache>) {
             interval.tick().await; // Wait for the next tick (10 seconds)
 
             let mut cache = cache_clone.lock().await;
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64;
+            let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(duration) => duration.as_millis() as u64,
+                Err(e) => {
+                    eprintln!("System time error: {}", e);
+                    continue;
+                }
+            };
 
             // Remove expired keys
             cache.retain(|_, entry| entry.expires_at.map_or(true, |expiry| now <= expiry));
@@ -145,11 +148,14 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
 
                 // Add this connection to the list of replicas
                 println!("Adding client {} as replica", socket_addr);
-                sender
-                    .unwrap() // Safe to unwrap; we are in the Master role
-                    .send(ReplicationMsg::AddReplica(socket_addr, writer.clone()))
-                    .await
-                    .context("Failed to add replica")?;
+                if let Some(sender) = sender {
+                    sender
+                        .send(ReplicationMsg::AddReplica(socket_addr, writer.clone()))
+                        .await
+                        .context("Failed to add replica")?;
+                } else {
+                    return Err(anyhow::anyhow!("Replication sender not available in master mode"));
+                }
                 println!("Replica {} added successfully", socket_addr);
                 let server_guard = server.lock().await;
 
@@ -165,7 +171,9 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
                 writer_guard.write_all(&full_resync_response).await?;
                 println!("Sent FULLRESYNC response to {}", socket_addr);
 
-                let _ = send_empty_rdb(&mut *writer_guard).await.unwrap();
+                if let Err(e) = send_empty_rdb(&mut *writer_guard).await {
+                    eprintln!("Failed to send empty RDB: {}", e);
+                }
                 println!("Sent empty RDB to {}", socket_addr);
 
                 writer_guard.flush().await?;
@@ -257,23 +265,42 @@ async fn load_rdb<W: AsyncWrite + Send + Unpin + 'static>(server: &RedisServer<W
         if let Ok(rdb_file) = RDBFile::read(dir, dbfilename) {
             if let Some(rdb) = rdb_file {
                 let mut cache = server.cache().lock().await;
-                let hash_table = &rdb.databases.get(&0).unwrap().hash_table;
+                if let Some(db) = rdb.databases.get(&0) {
+                    let hash_table = &db.hash_table;
 
-                for (key, db_entry) in hash_table.iter() {
-                    let value = match &db_entry.value {
-                        RedisValue::String(data) => String::from_utf8(data.to_vec()).unwrap(),
-                        RedisValue::Integer(data) => data.to_string(),
-                        _ => {
-                            unreachable!()
+                    for (key, db_entry) in hash_table.iter() {
+                        let value = match &db_entry.value {
+                            RedisValue::String(data) => match String::from_utf8(data.to_vec()) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    eprintln!("Failed to decode string value: {}", e);
+                                    continue;
+                                }
+                            },
+                            RedisValue::Integer(data) => data.to_string(),
+                            _ => {
+                                eprintln!("Unsupported value type in RDB, skipping");
+                                continue;
+                            }
+                        };
+                        let expires_at = if let Some(key_expiry) = &db_entry.expiry {
+                            Some(key_expiry.timestamp)
+                        } else {
+                            None
+                        };
+                        let cache_entry = CacheEntry { value, expires_at };
+                        match String::from_utf8(key.to_vec()) {
+                            Ok(key_str) => {
+                                cache.insert(key_str, cache_entry);
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to decode key: {}", e);
+                                continue;
+                            }
                         }
-                    };
-                    let expires_at = if let Some(key_expiry) = &db_entry.expiry {
-                        Some(key_expiry.timestamp)
-                    } else {
-                        None
-                    };
-                    let cache_entry = CacheEntry { value, expires_at };
-                    cache.insert(String::from_utf8(key.to_vec()).unwrap(), cache_entry);
+                    }
+                } else {
+                    eprintln!("No database with index 0 found in RDB file");
                 }
             }
         }
@@ -329,7 +356,13 @@ async fn main() -> std::io::Result<()> {
                     Some(ref inner) => Some(Arc::clone(inner)),
                     None => None,
                 };
-                let socket_addr = stream.peer_addr().unwrap();
+                let socket_addr = match stream.peer_addr() {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        eprintln!("Failed to get peer address: {}", e);
+                        continue;
+                    }
+                };
 
                 // Split the stream into a reader and a writer
                 let (reader, writer) = tokio::io::split(stream);

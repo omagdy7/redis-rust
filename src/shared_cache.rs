@@ -12,10 +12,10 @@ pub struct CacheEntry {
 impl CacheEntry {
     pub fn is_expired(&self) -> bool {
         if let Some(expiry) = self.expires_at {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64;
+            let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(duration) => duration.as_millis() as u64,
+                Err(_) => return false, // If we can't get time, assume not expired
+            };
             now > expiry
         } else {
             false

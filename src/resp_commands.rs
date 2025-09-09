@@ -78,22 +78,26 @@ impl SetCommand {
     pub fn calculate_expiry_time(&self) -> Option<u64> {
         match &self.expiry {
             Some(ExpiryOption::Seconds(secs)) => {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
-                Some(now + (secs * 1000))
+                match SystemTime::now().duration_since(UNIX_EPOCH) {
+                    Ok(duration) => {
+                        let now = duration.as_millis() as u64;
+                        Some(now + (secs * 1000))
+                    }
+                    Err(_) => None,
+                }
             }
             Some(ExpiryOption::Milliseconds(ms)) => {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
-                Some(now + ms)
+                match SystemTime::now().duration_since(UNIX_EPOCH) {
+                    Ok(duration) => {
+                        let now = duration.as_millis() as u64;
+                        Some(now + ms)
+                    }
+                    Err(_) => None,
+                }
             }
             Some(ExpiryOption::ExpiresAtSeconds(timestamp)) => Some(timestamp * 1000),
             Some(ExpiryOption::ExpiresAtMilliseconds(timestamp)) => Some(*timestamp),
-            Some(ExpiryOption::KeepTtl) => None, // Handled specially
+            Some(ExpiryOption::KeepTtl) => None, // Keep existing TTL
             None => None,
         }
     }

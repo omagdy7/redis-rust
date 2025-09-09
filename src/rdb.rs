@@ -38,62 +38,59 @@ pub enum RedisValue {
 
 impl RedisValue {
     /// Convert RedisValue to bytes using Redis string encoding format
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, RdbError> {
         match self {
             RedisValue::String(data) => encode_string(data.as_ref()),
             RedisValue::Integer(value) => encode_integer(*value),
             RedisValue::List(items) => {
-                let mut result = Vec::new();
+                let mut result = encode_length(items.len())?;
                 // For lists, we'd typically encode each item separately
                 // This is a simplified version that just encodes the count
-                result.extend(encode_length(items.len()));
                 for item in items {
-                    result.extend(encode_string(item.as_ref()));
+                    result.extend(encode_string(item.as_ref())?);
                 }
-                result
+                Ok(result)
             }
             RedisValue::Set(items) => {
-                let mut result = Vec::new();
-                result.extend(encode_length(items.len()));
+                let mut result = encode_length(items.len())?;
                 for item in items {
-                    result.extend(encode_string(item.as_ref()));
+                    result.extend(encode_string(item.as_ref())?);
                 }
-                result
+                Ok(result)
             }
             RedisValue::Hash(map) => {
-                let mut result = Vec::new();
-                result.extend(encode_length(map.len()));
+                let mut result = encode_length(map.len())?;
                 for (key, value) in map {
-                    result.extend(encode_string(key.as_ref()));
-                    result.extend(encode_string(value.as_ref()));
+                    result.extend(encode_string(key.as_ref())?);
+                    result.extend(encode_string(value.as_ref())?);
                 }
-                result
+                Ok(result)
             }
         }
     }
 }
 
 /// Encode a string using Redis length encoding + raw bytes
-fn encode_string(data: &[u8]) -> Vec<u8> {
-    let mut result = encode_length(data.len());
+fn encode_string(data: &[u8]) -> Result<Vec<u8>, RdbError> {
+    let mut result = encode_length(data.len())?;
     result.extend_from_slice(data);
-    result
+    Ok(result)
 }
 
 /// Encode an integer using Redis special encoding if possible, otherwise as string
-fn encode_integer(value: i64) -> Vec<u8> {
+fn encode_integer(value: i64) -> Result<Vec<u8>, RdbError> {
     // Try to use special integer encodings for efficiency
     if value >= i8::MIN as i64 && value <= i8::MAX as i64 {
         // 8-bit integer encoding: 0b11000000 (0xC0) followed by 1 byte
-        vec![0xC0, value as u8]
+        Ok(vec![0xC0, value as u8])
     } else if value >= i16::MIN as i64 && value <= i16::MAX as i64 {
         // 16-bit integer encoding: 0b11000001 (0xC1) followed by 2 bytes
         let bytes = (value as i16).to_be_bytes();
-        vec![0xC1, bytes[0], bytes[1]]
+        Ok(vec![0xC1, bytes[0], bytes[1]])
     } else if value >= i32::MIN as i64 && value <= i32::MAX as i64 {
         // 32-bit integer encoding: 0b11000010 (0xC2) followed by 4 bytes
         let bytes = (value as i32).to_be_bytes();
-        vec![0xC2, bytes[0], bytes[1], bytes[2], bytes[3]]
+        Ok(vec![0xC2, bytes[0], bytes[1], bytes[2], bytes[3]])
     } else {
         // For very large integers, encode as string
         let string_repr = value.to_string();
@@ -102,51 +99,60 @@ fn encode_integer(value: i64) -> Vec<u8> {
 }
 
 /// Encode length using Redis length encoding format
-fn encode_length(len: usize) -> Vec<u8> {
+fn encode_length(len: usize) -> Result<Vec<u8>, RdbError> {
     if len < 64 {
         // 6-bit length (0-63): 0b00xxxxxx
-        vec![len as u8]
+        Ok(vec![len as u8])
     } else if len < 16384 {
         // 14-bit length: 0b01xxxxxx xxxxxxxx
         let first_byte = 0x40 | ((len >> 8) as u8);
         let second_byte = (len & 0xFF) as u8;
-        vec![first_byte, second_byte]
+        Ok(vec![first_byte, second_byte])
     } else if len <= u32::MAX as usize {
         // 32-bit length: 0b10000000 followed by 4 bytes big-endian
         let bytes = (len as u32).to_be_bytes();
-        vec![0x80, bytes[0], bytes[1], bytes[2], bytes[3]]
+        Ok(vec![0x80, bytes[0], bytes[1], bytes[2], bytes[3]])
     } else {
-        panic!("Length too large for Redis encoding: {}", len);
+        Err(RdbError::InvalidLength { length: len })
     }
 }
 
-// Custom error type for parsing
-#[derive(Debug, PartialEq)]
-pub enum ParseError {
+/// Custom error type for RDB parsing operations
+#[derive(Debug, thiserror::Error)]
+pub enum RdbError {
+    #[error("Invalid magic number in RDB file")]
     InvalidMagicNumber,
-    InvalidVersion,
+
+    #[error("Invalid version in RDB file: {version}")]
+    InvalidVersion { version: String },
+
+    #[error("Unexpected end of file while parsing RDB")]
     UnexpectedEof,
+
+    #[error("Invalid metadata in RDB file")]
     InvalidMetadata,
-    InvalidLength,
+
+    #[error("Invalid length encoding: {length}")]
+    InvalidLength { length: usize },
+
+    #[error("Array conversion failed: {message}")]
+    ArrayConversionError { message: String },
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("UTF-8 conversion error: {0}")]
+    Utf8(#[from] std::str::Utf8Error),
+
+    #[error("Integer conversion error: {0}")]
+    TryFromInt(#[from] std::num::TryFromIntError),
+
+    #[error("Value type conversion failed: {value}")]
+    ValueTypeConversion { value: u8 },
 }
 
-use std::fmt;
-
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use ParseError::*;
-        let message = match self {
-            InvalidMagicNumber => "Invalid magic number",
-            InvalidVersion => "Invalid version",
-            UnexpectedEof => "Unexpected end of file",
-            InvalidMetadata => "Invalid metadata",
-            InvalidLength => "Invalid length",
-        };
-        write!(f, "{}", message)
-    }
-}
-
-impl std::error::Error for ParseError {}
+// Alias for backward compatibility
+pub type ParseError = RdbError;
 
 // Custom parsing trait that returns bytes consumed
 pub trait FromBytes: Sized {
@@ -212,8 +218,8 @@ type LengthEncoding = usize;
 type BytesConsumed = usize;
 
 /// Parses a Redis length-encoded integer.
-fn parse_length(bytes: &[u8]) -> Result<(usize, usize), ParseError> {
-    let (first_byte, mut rest) = bytes.split_at_checked(1).ok_or(ParseError::UnexpectedEof)?;
+fn parse_length(bytes: &[u8]) -> Result<(usize, usize), RdbError> {
+    let (first_byte, mut rest) = bytes.split_at_checked(1).ok_or(RdbError::UnexpectedEof)?;
     let mut consumed = 1;
 
     match first_byte[0] >> 6 {
@@ -225,7 +231,7 @@ fn parse_length(bytes: &[u8]) -> Result<(usize, usize), ParseError> {
         }
         0b01 => {
             // 14-bit length
-            let (second_byte, _) = rest.split_at_checked(1).ok_or(ParseError::UnexpectedEof)?;
+            let (second_byte, _) = rest.split_at_checked(1).ok_or(RdbError::UnexpectedEof)?;
             consumed += 1;
 
             // We need to get the first last 6 bits(most right bits) of the first byte and then the
@@ -236,16 +242,20 @@ fn parse_length(bytes: &[u8]) -> Result<(usize, usize), ParseError> {
         }
         0b10 => {
             // 32-bit length from next 4 bytes
-            let (len_bytes, _) = rest.split_at_checked(4).ok_or(ParseError::UnexpectedEof)?;
+            let (len_bytes, _) = rest.split_at_checked(4).ok_or(RdbError::UnexpectedEof)?;
             consumed += 4;
 
             // pretty straight forward just ignore the first byte and interpret the next 4 bytes as a u32
-            let len = u32::from_be_bytes(len_bytes.try_into().unwrap()) as usize;
+            let len = u32::from_be_bytes(
+                len_bytes.try_into().map_err(|_| RdbError::ArrayConversionError {
+                    message: "Failed to convert slice to array for u32".to_string()
+                })?
+            ) as usize;
             Ok((len, consumed))
         }
         0b11 => {
             // Special format, not a length
-            Err(ParseError::InvalidLength)
+            Err(RdbError::InvalidLength { length: first_byte[0] as usize })
         }
         _ => unreachable!(),
     }
@@ -255,27 +265,27 @@ fn parse_special_length(
     special_type: u8,
     bytes: &[u8],
     bytes_consumed: &mut usize,
-) -> Result<(RedisValue, usize), ParseError> {
+) -> Result<(RedisValue, usize), RdbError> {
     match special_type {
         0 => {
-            let (int_bytes, bytes) = bytes.split_at_checked(1).ok_or(ParseError::UnexpectedEof)?;
+            let (int_bytes, _) = bytes.split_at_checked(1).ok_or(RdbError::UnexpectedEof)?;
             *bytes_consumed += 1;
             Ok((RedisValue::Integer(int_bytes[0] as i64), *bytes_consumed))
         }
         1 => {
-            let (int_bytes, bytes) = bytes.split_at_checked(2).ok_or(ParseError::UnexpectedEof)?;
+            let (int_bytes, _) = bytes.split_at_checked(2).ok_or(RdbError::UnexpectedEof)?;
             *bytes_consumed += 2;
             let value = i16::from_be_bytes([int_bytes[0], int_bytes[1]]) as i64;
             Ok((RedisValue::Integer(value), *bytes_consumed))
         }
         2 => {
-            let (int_bytes, bytes) = bytes.split_at_checked(4).ok_or(ParseError::UnexpectedEof)?;
+            let (int_bytes, _) = bytes.split_at_checked(4).ok_or(RdbError::UnexpectedEof)?;
             *bytes_consumed += 4;
             let value =
                 i32::from_be_bytes([int_bytes[0], int_bytes[1], int_bytes[2], int_bytes[3]]) as i64;
             Ok((RedisValue::Integer(value), *bytes_consumed))
         }
-        _ => Err(ParseError::InvalidLength),
+        _ => Err(RdbError::InvalidLength { length: special_type as usize }),
     }
 }
 
@@ -308,29 +318,27 @@ pub struct RDBHeader {
 }
 
 impl FromBytes for RDBHeader {
-    fn from_bytes(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
+    fn from_bytes(bytes: &[u8]) -> Result<(Self, usize), RdbError> {
         let mut rdb_header = RDBHeader::default();
 
         // first 5 bytes should match the magic number
-        let (magic_number, rest) = bytes.split_at_checked(5).ok_or(ParseError::UnexpectedEof)?;
+        let (magic_number, rest) = bytes.split_at_checked(5).ok_or(RdbError::UnexpectedEof)?;
 
-        if let b"REDIS" = magic_number {
-            rdb_header.magic_number = *b"REDIS";
-        } else {
-            return Err(ParseError::InvalidMagicNumber);
+        if magic_number != b"REDIS" {
+            return Err(RdbError::InvalidMagicNumber);
         }
+        rdb_header.magic_number = *b"REDIS";
 
         // The following 4 bytes should match the version number
-        let (version, _) = rest.split_at_checked(4).ok_or(ParseError::UnexpectedEof)?;
+        let (version, _) = rest.split_at_checked(4).ok_or(RdbError::UnexpectedEof)?;
 
-        if let Ok(version_str) = std::str::from_utf8(version) {
-            if ("0001" <= version_str) && (version_str <= "0011") {
-                rdb_header.version = version.try_into().unwrap();
-            } else {
-                return Err(ParseError::InvalidVersion);
-            }
+        let version_str = std::str::from_utf8(version)?;
+        if ("0001" <= version_str) && (version_str <= "0011") {
+            rdb_header.version = version.try_into().map_err(|_| RdbError::ArrayConversionError {
+                message: "Failed to convert version bytes to array".to_string()
+            })?;
         } else {
-            return Err(ParseError::InvalidVersion);
+            return Err(RdbError::InvalidVersion { version: version_str.to_string() });
         }
 
         Ok((rdb_header, 9))
@@ -343,7 +351,7 @@ pub struct RDBMetaData {
 }
 
 impl FromBytes for RDBMetaData {
-    fn from_bytes(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
+    fn from_bytes(bytes: &[u8]) -> Result<(Self, usize), RdbError> {
         let mut metadata = HashMap::new();
         let mut remaining = bytes;
         let mut total_consumed = 0;
@@ -375,13 +383,13 @@ impl FromBytes for RDBMetaData {
             let key_data = match key {
                 RedisValue::String(data) => data,
                 RedisValue::Integer(data) => Bytes::copy_from_slice(data.to_string().as_bytes()),
-                _ => return Err(ParseError::InvalidMetadata),
+                _ => return Err(RdbError::InvalidMetadata),
             };
 
             let value_data = match value {
                 RedisValue::String(data) => data,
                 RedisValue::Integer(data) => Bytes::copy_from_slice(data.to_string().as_bytes()),
-                _ => return Err(ParseError::InvalidMetadata),
+                _ => return Err(RdbError::InvalidMetadata),
             };
 
             metadata.insert(key_data, value_data);
@@ -412,7 +420,7 @@ fn parse_db_key_value(
     expiry: Option<KeyExpiry>,
     value_type: ValueType,
     hash_table: &mut HashMap<Bytes, DatabaseEntry>,
-) -> Result<(), ParseError> {
+) -> Result<(), RdbError> {
     // Parse key string
     let (key, key_consumed) = RedisValue::from_bytes(remaining)?;
     *remaining = &remaining[key_consumed..];
@@ -432,7 +440,7 @@ fn parse_db_key_value(
     let key_data = match key {
         RedisValue::String(data) => data,
         RedisValue::Integer(data) => Bytes::copy_from_slice(data.to_string().as_bytes()),
-        _ => return Err(ParseError::InvalidMetadata),
+        _ => return Err(RdbError::InvalidMetadata),
     };
 
     hash_table.insert(key_data, database_entry);
@@ -441,7 +449,7 @@ fn parse_db_key_value(
 }
 
 impl FromBytes for RDBDatabase {
-    fn from_bytes(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
+    fn from_bytes(bytes: &[u8]) -> Result<(Self, usize), RdbError> {
         let mut hash_table: HashMap<Bytes, DatabaseEntry> = HashMap::new();
         let mut remaining = bytes;
         let mut size_hints = HashTableSizeInfo::default();
@@ -485,7 +493,7 @@ impl FromBytes for RDBDatabase {
                 RDBFile::EXPIRE_TIME_MS => {
                     let (timestamp_bytes, rest) = remaining
                         .split_at_checked(8)
-                        .ok_or(ParseError::UnexpectedEof)?;
+                        .ok_or(RdbError::UnexpectedEof)?;
 
                     remaining = rest;
                     total_consumed += 8;
@@ -493,12 +501,14 @@ impl FromBytes for RDBDatabase {
                     let timestamp = u64::from_le_bytes(
                         timestamp_bytes[0..8]
                             .try_into()
-                            .expect("This should always be atleast 8 bytes"),
+                            .map_err(|_| RdbError::ArrayConversionError {
+                                message: "Failed to convert timestamp bytes to array".to_string()
+                            })?,
                     );
 
                     let (value_type_byte, rest) = remaining
                         .split_at_checked(1)
-                        .ok_or(ParseError::UnexpectedEof)?;
+                        .ok_or(RdbError::UnexpectedEof)?;
 
                     remaining = rest;
                     total_consumed += 1;
@@ -508,7 +518,7 @@ impl FromBytes for RDBDatabase {
                         unit: ExpiryUnit::Milliseconds,
                     });
 
-                    match ValueType::try_from(value_type_byte[0]).unwrap() {
+                    match ValueType::try_from(value_type_byte[0]).map_err(|_| RdbError::ValueTypeConversion { value: value_type_byte[0] })? {
                         ValueType::String => {
                             parse_db_key_value(
                                 &mut remaining,
@@ -524,7 +534,7 @@ impl FromBytes for RDBDatabase {
                 RDBFile::EXPIRE_TIME => {
                     let (timestamp_bytes, rest) = remaining
                         .split_at_checked(4)
-                        .ok_or(ParseError::UnexpectedEof)?;
+                        .ok_or(RdbError::UnexpectedEof)?;
 
                     remaining = rest;
                     total_consumed += 4;
@@ -532,12 +542,14 @@ impl FromBytes for RDBDatabase {
                     let timestamp = u32::from_le_bytes(
                         timestamp_bytes[0..4]
                             .try_into()
-                            .expect("This should always be atleast 4 bytes"),
+                            .map_err(|_| RdbError::ArrayConversionError {
+                                message: "Failed to convert timestamp bytes to array".to_string()
+                            })?,
                     ) as u64;
 
                     let (value_type_byte, rest) = remaining
                         .split_at_checked(1)
-                        .ok_or(ParseError::UnexpectedEof)?;
+                        .ok_or(RdbError::UnexpectedEof)?;
 
                     remaining = rest;
                     total_consumed += 1;
@@ -547,7 +559,7 @@ impl FromBytes for RDBDatabase {
                         unit: ExpiryUnit::Seconds,
                     });
 
-                    match ValueType::try_from(value_type_byte[0]).unwrap() {
+                    match ValueType::try_from(value_type_byte[0]).map_err(|_| RdbError::ValueTypeConversion { value: value_type_byte[0] })? {
                         ValueType::String => {
                             parse_db_key_value(
                                 &mut remaining,
@@ -560,7 +572,7 @@ impl FromBytes for RDBDatabase {
                         _ => unreachable!(),
                     }
                 }
-                n @ 0..15 => match ValueType::try_from(n as u8).unwrap() {
+                n @ 0..15 => match ValueType::try_from(n as u8).map_err(|_| RdbError::ValueTypeConversion { value: n as u8 })? {
                     ValueType::String => {
                         parse_db_key_value(
                             &mut remaining,
@@ -596,7 +608,7 @@ pub struct RDBFile {
 }
 
 impl FromBytes for RDBFile {
-    fn from_bytes(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
+    fn from_bytes(bytes: &[u8]) -> Result<(Self, usize), RdbError> {
         let mut remaining = bytes;
         let mut total_consumed = 0;
         let mut databases = HashMap::new();
@@ -638,9 +650,9 @@ impl FromBytes for RDBFile {
         // We must consume it here.
         let (eof_byte, rest) = remaining
             .split_at_checked(1)
-            .ok_or(ParseError::UnexpectedEof)?;
+            .ok_or(RdbError::UnexpectedEof)?;
         if eof_byte[0] != Self::EOF {
-            return Err(ParseError::InvalidMetadata); // Expected EOF marker
+            return Err(RdbError::InvalidMetadata); // Expected EOF marker
         }
         total_consumed += 1;
         remaining = rest;
@@ -649,8 +661,12 @@ impl FromBytes for RDBFile {
         if remaining.len() >= 8 {
             let (checksum_bytes, _) = remaining
                 .split_at_checked(8)
-                .ok_or(ParseError::UnexpectedEof)?;
-            let checksum = u64::from_le_bytes(checksum_bytes.try_into().unwrap());
+                .ok_or(RdbError::UnexpectedEof)?;
+            let checksum = u64::from_le_bytes(
+                checksum_bytes.try_into().map_err(|_| RdbError::ArrayConversionError {
+                    message: "Failed to convert checksum bytes to array".to_string()
+                })?
+            );
             total_consumed += 8;
 
             let rdb_file = RDBFile {
@@ -667,7 +683,7 @@ impl FromBytes for RDBFile {
 }
 
 impl RDBFile {
-    pub fn read(dir: String, dbfilename: String) -> Result<Option<Self>, anyhow::Error> {
+    pub fn read(dir: String, dbfilename: String) -> Result<Option<Self>, RdbError> {
         let dir = Path::new(&dir);
         let file_path = dir.join(dbfilename);
 

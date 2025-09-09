@@ -111,8 +111,7 @@ trait CommandHandler<W: AsyncWrite + Send + Unpin + 'static> {
 trait SlaveRole {
     async fn connect(&self) -> Result<TcpStream, std::io::Error>;
     async fn handshake(&mut self) -> Result<(), String>;
-    // TODO: This should return a Result
-    async fn start_replication_handler(self, rest: Vec<u8>);
+    async fn start_replication_handler(self, rest: Vec<u8>) -> Result<(), String>;
 }
 
 impl<W: AsyncWrite + Send + Unpin + 'static> RedisServer<W> {
@@ -468,18 +467,24 @@ impl SlaveRole for SlaveServer {
                 // assume I would get nice segments refelecting each command
                 if !rest.is_empty() {
                     // TODO: Sync the rdb_file with the slave's cache
-                    // TODO: Find a way to propagate the error up the stack by using anyhow or something
-                    let (_rdb_file, bytes_consumed) = RDBFile::from_bytes(rest).unwrap();
-                    rest = &rest[bytes_consumed..];
-                    println!("rdb bytes: {}", bytes_consumed);
-                    println!("remaining bytes after rdb: {}", rest.len());
+                    match RDBFile::from_bytes(rest) {
+                        Ok((_rdb_file, bytes_consumed)) => {
+                            rest = &rest[bytes_consumed..];
+                            println!("rdb bytes: {}", bytes_consumed);
+                            println!("remaining bytes after rdb: {}", rest.len());
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to parse RDB file: {}", e);
+                            return Err(format!("RDB parsing error: {}", e));
+                        }
+                    }
                 }
 
                 // Store the persistent connection
                 {
                     self.state.lock().await.connection = Some(Arc::new(Mutex::new(stream)));
                 }
-                self.clone().start_replication_handler(rest.to_vec()).await;
+                self.clone().start_replication_handler(rest.to_vec()).await?;
 
                 Ok(())
             }
@@ -487,14 +492,14 @@ impl SlaveRole for SlaveServer {
         }
     }
 
-    // TODO: This should return a Result
-    async fn start_replication_handler(self, initial_data: Vec<u8>) {
+    async fn start_replication_handler(self, initial_data: Vec<u8>) -> Result<(), String> {
         println!("In start replication handler");
         let state = self.state.clone();
         let server_clone = self.clone(); // Clone self to pass to execute
 
         // Spawn the background listener thread
         tokio::spawn(async move {
+            let result = async {
             println!("Inside the tokio replication handler task");
 
             // This is our persistent buffer. It starts with the leftover data from the handshake.
@@ -548,8 +553,7 @@ impl SlaveRole for SlaveServer {
                             if let Some(conn_arc) = master_connection {
                                 let mut stream_guard = conn_arc.lock().await;
                                 if let Err(e) = stream_guard.write_all(&response).await {
-                                    eprintln!("Failed to write response to master: {}", e);
-                                    return; // Connection is likely dead, exit task.
+                                    return Err(e.to_string());
                                 }
                             }
                         }
@@ -583,18 +587,15 @@ impl SlaveRole for SlaveServer {
                     let mut stream_guard = stream_arc.lock().await;
                     match stream_guard.read(&mut temp_read_buffer).await {
                         Ok(0) => {
-                            eprintln!("Master disconnected.");
-                            break; // Exit the loop if connection is closed.
+                            return Ok(());
                         }
                         Ok(n) => n,
                         Err(e) => {
-                            eprintln!("Error reading from master: {}", e);
-                            break; // Exit on error.
+                            return Err(e.to_string());
                         }
                     }
                 } else {
-                    eprintln!("No connection to master found.");
-                    break;
+                    return Err("No connection to master found.".to_string());
                 };
 
                 println!("Read {} new bytes from master.", bytes_read);
@@ -602,7 +603,12 @@ impl SlaveRole for SlaveServer {
                 // Append the newly read data to our persistent buffer.
                 processing_buffer.extend_from_slice(&temp_read_buffer[..bytes_read]);
             }
+            }.await;
+            if let Err(e) = result {
+                eprintln!("Replication handler error: {}", e);
+            }
         });
+        return Ok(());
     }
 }
 
@@ -1000,7 +1006,10 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 let cache = self.cache.lock().await;
                 println!("Cache lock acquired for KEYS");
 
-                let regex = Regex::new(&query).unwrap();
+                let regex = match Regex::new(&query) {
+                    Ok(regex) => regex,
+                    Err(_) => return resp_bytes!(error "ERR invalid regex pattern"),
+                };
                 let matching_keys: Vec<RespType> = cache
                     .keys()
                     .filter(|key| regex.is_match(key))
@@ -1189,7 +1198,10 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
             RC::Keys(query) => {
                 let query = query.replace('*', ".*");
                 let cache = self.cache.lock().await;
-                let regex = Regex::new(&query).unwrap();
+                let regex = match Regex::new(&query) {
+                    Ok(regex) => regex,
+                    Err(_) => return resp_bytes!(error "ERR invalid regex pattern"),
+                };
                 let matching_keys: Vec<RespType> = cache
                     .keys()
                     .filter(|key| regex.is_match(key))

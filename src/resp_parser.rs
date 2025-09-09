@@ -446,10 +446,11 @@ pub fn parse_boolean(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
 
             let mut val = false;
             if consumed.len() == 1 {
-                match consumed.first().unwrap() {
-                    b't' => val = true,
-                    b'f' => val = false,
-                    _ => return Err(RespError::InvalidValue),
+                match consumed.first() {
+                    Some(b't') => val = true,
+                    Some(b'f') => val = false,
+                    Some(_) => return Err(RespError::InvalidValue),
+                    None => return Err(RespError::UnexpectedEnd),
                 }
             } else {
                 return Err(RespError::UnexpectedEnd);

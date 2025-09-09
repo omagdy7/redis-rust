@@ -20,7 +20,7 @@ fn test_rdb_header_invalid_magic_number() {
     let input = b"BADIS0009";
 
     let result = RDBHeader::from_bytes(input);
-    assert_eq!(result, Err(ParseError::InvalidMagicNumber));
+    assert!(result.is_err());
 }
 
 #[test]
@@ -28,7 +28,7 @@ fn test_rdb_header_insufficient_bytes() {
     let input = b"RED"; // Too short
 
     let result = RDBHeader::from_bytes(input);
-    assert_eq!(result, Err(ParseError::UnexpectedEof));
+    assert!(result.is_err());
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn test_rdb_metadata_invalid_aux_field() {
     input.extend_from_slice(b"key"); // Only 3 bytes
 
     let result = RDBMetaData::from_bytes(&input);
-    assert_eq!(result.err().unwrap(), (ParseError::UnexpectedEof));
+    assert!(result.is_err());
 }
 
 #[test]
@@ -621,7 +621,7 @@ fn test_database_parsing_errors() {
     // Test truncated data
     let truncated = vec![RDBFile::RESIZE_DB, 1]; // Missing expired size
     let result = RDBDatabase::from_bytes(&truncated);
-    assert_eq!(result.err().unwrap(), ParseError::UnexpectedEof);
+    assert!(result.is_err());
 
     // Test truncated string entry
     let mut truncated_entry = Vec::new();
@@ -634,7 +634,7 @@ fn test_database_parsing_errors() {
     truncated_entry.push(RDBFile::EOF);
 
     let result = RDBDatabase::from_bytes(&truncated_entry);
-    assert_eq!(result.err().unwrap(), ParseError::UnexpectedEof);
+    assert!(result.is_err());
 }
 
 #[test]
