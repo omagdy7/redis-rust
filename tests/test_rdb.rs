@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use codecrafters_redis::rdb::*;
 
 #[test]
@@ -84,8 +85,8 @@ fn test_rdb_metadata_single_aux_field() {
     let (metadata, bytes_consumed) = result.unwrap();
     assert_eq!(metadata.metadata.len(), 1);
     assert_eq!(
-        metadata.metadata.get(&"redis-ver".as_bytes().to_vec()),
-        Some(&"6.0.0".as_bytes().to_vec())
+        metadata.metadata.get("redis-ver".as_bytes()),
+        Some(&Bytes::from("6.0.0"))
     );
     assert_eq!(bytes_consumed, 17); // 1 + 1 + 9 + 1 + 5 = 17 bytes
 }
@@ -117,12 +118,12 @@ fn test_rdb_metadata_multiple_aux_fields() {
     let (metadata, bytes_consumed) = result.unwrap();
     assert_eq!(metadata.metadata.len(), 2);
     assert_eq!(
-        metadata.metadata.get(&"redis-ver".as_bytes().to_vec()),
-        Some(&"6.0.0".as_bytes().to_vec())
+        metadata.metadata.get("redis-ver".as_bytes()),
+        Some(&Bytes::from("6.0.0"))
     );
     assert_eq!(
-        metadata.metadata.get(&"redis-bits".as_bytes().to_vec()),
-        Some(&"64".as_bytes().to_vec())
+        metadata.metadata.get("redis-bits".as_bytes()),
+        Some(&Bytes::from("64"))
     );
     assert_eq!(bytes_consumed, 32); // Calculate: 1+1+9+1+5 + 1+1+10+1+2 = 32
 }
@@ -155,7 +156,7 @@ fn test_rdb_metadata_string_encoding_edge_cases() {
     let (metadata, _) = result.unwrap();
     // Since we're storing as String, this tests how we handle non-UTF8
     assert_eq!(metadata.metadata.len(), 1);
-    assert!(metadata.metadata.contains_key(&"test".as_bytes().to_vec()));
+    assert!(metadata.metadata.contains_key("test".as_bytes()));
 }
 
 #[test]
@@ -271,7 +272,7 @@ fn test_single_string_entry_database() {
     assert!(entry.expiry.is_none());
     assert_eq!(entry.value_type as u8, 0); // String type
     if let RedisValue::String(value) = &entry.value {
-        assert_eq!(value, b"myvalue");
+        assert_eq!(value.as_ref(), b"myvalue");
     } else {
         panic!("Expected string value");
     }
@@ -305,21 +306,21 @@ fn test_multiple_string_entries() {
     // Verify all entries
     let entry1 = database.hash_table.get(b"key1".as_slice()).unwrap();
     if let RedisValue::String(value) = &entry1.value {
-        assert_eq!(value, b"value1");
+        assert_eq!(value.as_ref(), b"value1");
     } else {
         panic!("Expected string value");
     }
 
     let entry2 = database.hash_table.get(b"key2".as_slice()).unwrap();
     if let RedisValue::String(value) = &entry2.value {
-        assert_eq!(value, b"value2");
+        assert_eq!(value.as_ref(), b"value2");
     } else {
         panic!("Expected string value");
     }
 
     let entry3 = database.hash_table.get(b"key3".as_slice()).unwrap();
     if let RedisValue::String(value) = &entry3.value {
-        assert_eq!(value, b"value3");
+        assert_eq!(value.as_ref(), b"value3");
     } else {
         panic!("Expected string value");
     }
@@ -358,7 +359,7 @@ fn test_string_entry_with_expiry_seconds() {
     assert!(matches!(expiry.unit, ExpiryUnit::Seconds));
 
     if let RedisValue::String(value) = &entry.value {
-        assert_eq!(value, b"expiring_value");
+        assert_eq!(value.as_ref(), b"expiring_value");
     } else {
         panic!("Expected string value");
     }
@@ -398,7 +399,7 @@ fn test_string_entry_with_expiry_milliseconds() {
     assert!(matches!(expiry.unit, ExpiryUnit::Milliseconds));
 
     if let RedisValue::String(value) = &entry.value {
-        assert_eq!(value, b"expiring_ms_value");
+        assert_eq!(value.as_ref(), b"expiring_ms_value");
     } else {
         panic!("Expected string value");
     }
@@ -558,9 +559,9 @@ fn test_binary_string_data() {
     assert_eq!(database.hash_table.len(), 2);
 
     // Verify binary data preserved
-    let binary_entry = database.hash_table.get(&binary_key.to_vec()).unwrap();
+    let binary_entry = database.hash_table.get(&Bytes::copy_from_slice(binary_key)).unwrap();
     if let RedisValue::String(value) = &binary_entry.value {
-        assert_eq!(value, binary_value);
+        assert_eq!(value.as_ref(), binary_value);
     } else {
         panic!("Expected string value");
     }

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use bytes::Bytes;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -9,14 +10,14 @@ use codecrafters_redis::shared_cache::{Cache, CacheEntry};
 // Test Helpers & Mocks
 /// Creates a new, empty shared cache for each test.
 fn new_cache() -> SharedMut<Cache> {
-    Arc::new(Mutex::new(HashMap::new()))
+    Arc::new(Mutex::new(HashMap::<String, CacheEntry>::new()))
 }
 
 /// Builds a `RespType::Array` from string slices to simplify parser tests.
 fn build_command_from_str_slice(args: &[&str]) -> RespType {
     let resp_args = args
         .iter()
-        .map(|s| RespType::BulkString(s.to_string().into_bytes()))
+        .map(|s| RespType::BulkString(Bytes::copy_from_slice(s.as_bytes())))
         .collect();
     RespType::Array(resp_args)
 }

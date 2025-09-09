@@ -261,7 +261,7 @@ async fn load_rdb<W: AsyncWrite + Send + Unpin + 'static>(server: &RedisServer<W
 
                 for (key, db_entry) in hash_table.iter() {
                     let value = match &db_entry.value {
-                        RedisValue::String(data) => String::from_utf8(data.clone()).unwrap(),
+                        RedisValue::String(data) => String::from_utf8(data.to_vec()).unwrap(),
                         RedisValue::Integer(data) => data.to_string(),
                         _ => {
                             unreachable!()
@@ -273,7 +273,7 @@ async fn load_rdb<W: AsyncWrite + Send + Unpin + 'static>(server: &RedisServer<W
                         None
                     };
                     let cache_entry = CacheEntry { value, expires_at };
-                    cache.insert(String::from_utf8(key.clone()).unwrap(), cache_entry);
+                    cache.insert(String::from_utf8(key.to_vec()).unwrap(), cache_entry);
                 }
             }
         }

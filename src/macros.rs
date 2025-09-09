@@ -1,3 +1,5 @@
+use bytes::Bytes;
+
 #[macro_export]
 macro_rules! resp_bytes {
     // Null: resp!(null)
@@ -113,7 +115,7 @@ macro_rules! resp {
 
     // Bulk String: resp!(bulk "hello") or resp!(bulk vec![104, 101, 108, 108, 111])
     (bulk $s:expr) => {
-        RespType::BulkString($s.into())
+        RespType::BulkString(Bytes::copy_from_slice($s.as_bytes()))
     };
 
     // Array: resp!(array => [resp!(bulk "one"), resp!(int 2)])

@@ -8,6 +8,7 @@ use std::{
     io::Read,
     isize,
 };
+use bytes::Bytes;
 
 //  TODO: [ ] Refactor this mess and find a better way to merge the RespType and RedisValue type??
 //  TODO: [ ] Find a better way to convert from RespType to bytes and vice versa
@@ -390,7 +391,7 @@ pub fn parse_bulk_strings(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> 
                 return Err(RespError::UnexpectedEnd);
             }
 
-            let bulk_string = remained[..length as usize].to_vec();
+            let bulk_string = Bytes::copy_from_slice(&remained[..length as usize]);
             let remaining_after_string = &remained[length as usize..];
 
             if !remaining_after_string.starts_with(b"\r\n") {
@@ -571,7 +572,7 @@ pub enum RespType {
     SimpleString(String),            // +
     SimpleError(String),             // -
     Integer(u64),                    // :
-    BulkString(Vec<u8>),             // $
+    BulkString(Bytes),             // $
     Array(Vec<RespType>),            // *
     Null(),                          // _
     Boolean(bool),                   // #
@@ -593,7 +594,7 @@ impl RespType {
             RespType::Integer(i) => format!(":{}\r\n", i).into_bytes(),
             RespType::BulkString(bytes) => {
                 let len = bytes.len();
-                let s = String::from_utf8_lossy(bytes);
+                let s = String::from_utf8_lossy(bytes.as_ref());
                 format!("${}\r\n{}\r\n", len, s).into_bytes()
             }
             RespType::Array(arr) => {
@@ -638,7 +639,7 @@ impl RespType {
             RespType::SimpleError(s) => format!("{}", s),
             RespType::Integer(i) => format!("{}", i),
             RespType::BulkString(bytes) => {
-                let s = String::from_utf8_lossy(bytes);
+                let s = String::from_utf8_lossy(bytes.as_ref());
                 format!("{}", s)
             }
             RespType::Array(arr) => {
@@ -687,7 +688,7 @@ impl PartialEq for RespType {
             (RespType::SimpleString(a), RespType::SimpleString(b)) => a == b,
             (RespType::SimpleError(a), RespType::SimpleError(b)) => a == b,
             (RespType::Integer(a), RespType::Integer(b)) => a == b,
-            (RespType::BulkString(a), RespType::BulkString(b)) => a == b,
+            (RespType::BulkString(a), RespType::BulkString(b)) => a.as_ref() == b.as_ref(),
             (RespType::Array(a), RespType::Array(b)) => a == b,
             (RespType::Null(), RespType::Null()) => true,
             (RespType::Boolean(a), RespType::Boolean(b)) => a == b,
@@ -711,7 +712,7 @@ impl PartialEq<&str> for RespType {
             RespType::SimpleError(s) => s == other,
             RespType::BigNumbers(s) => s == other,
             RespType::BulkString(bytes) => {
-                for (b1, b2) in bytes.iter().zip(other.as_bytes().iter()) {
+                for (b1, b2) in bytes.as_ref().iter().zip(other.as_bytes().iter()) {
                     if b1 != b2 {
                         return false;
                     }
@@ -730,7 +731,7 @@ impl PartialEq<str> for RespType {
             RespType::SimpleError(s) => s == other,
             RespType::BigNumbers(s) => s == other,
             RespType::BulkString(bytes) => {
-                if let Ok(s) = std::str::from_utf8(bytes) {
+                if let Ok(s) = std::str::from_utf8(bytes.as_ref()) {
                     *s == *other
                 } else {
                     false
@@ -748,7 +749,7 @@ impl PartialEq<String> for RespType {
             RespType::SimpleError(s) => s == other,
             RespType::BigNumbers(s) => s == other,
             RespType::BulkString(bytes) => {
-                for (b1, b2) in bytes.iter().zip(other.as_bytes().iter()) {
+                for (b1, b2) in bytes.as_ref().iter().zip(other.as_bytes().iter()) {
                     if b1 != b2 {
                         return false;
                     }

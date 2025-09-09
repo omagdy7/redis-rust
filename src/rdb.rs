@@ -9,37 +9,38 @@ use std::{
     path::Path,
 };
 
+use bytes::Bytes;
 use thiserror::Error;
 
 use crate::resp_commands::ExpiryOption;
 
 /// Represents any possible value that a key can hold in Redis.
 ///
-/// Note: All "string" elements are represented as `Vec<u8>` because
+/// Note: All "string" elements are represented as `Bytes` because
 /// Redis strings are binary-safe and not guaranteed to be valid UTF-8.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedisValue {
     /// The STRING type.
-    String(Vec<u8>),
+    String(Bytes),
 
     /// The Integer type.
     Integer(i64),
 
     /// The LIST type. An ordered collection of strings.
-    List(Vec<Vec<u8>>),
+    List(Vec<Bytes>),
 
     /// The SET type. An unordered collection of unique strings.
-    Set(HashSet<Vec<u8>>),
+    Set(HashSet<Bytes>),
 
     /// The HASH type. A collection of field-value pairs.
-    Hash(HashMap<Vec<u8>, Vec<u8>>),
+    Hash(HashMap<Bytes, Bytes>),
 }
 
 impl RedisValue {
     /// Convert RedisValue to bytes using Redis string encoding format
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
-            RedisValue::String(data) => encode_string(data),
+            RedisValue::String(data) => encode_string(data.as_ref()),
             RedisValue::Integer(value) => encode_integer(*value),
             RedisValue::List(items) => {
                 let mut result = Vec::new();
@@ -47,7 +48,7 @@ impl RedisValue {
                 // This is a simplified version that just encodes the count
                 result.extend(encode_length(items.len()));
                 for item in items {
-                    result.extend(encode_string(item));
+                    result.extend(encode_string(item.as_ref()));
                 }
                 result
             }
@@ -55,7 +56,7 @@ impl RedisValue {
                 let mut result = Vec::new();
                 result.extend(encode_length(items.len()));
                 for item in items {
-                    result.extend(encode_string(item));
+                    result.extend(encode_string(item.as_ref()));
                 }
                 result
             }
@@ -63,8 +64,8 @@ impl RedisValue {
                 let mut result = Vec::new();
                 result.extend(encode_length(map.len()));
                 for (key, value) in map {
-                    result.extend(encode_string(key));
-                    result.extend(encode_string(value));
+                    result.extend(encode_string(key.as_ref()));
+                    result.extend(encode_string(value.as_ref()));
                 }
                 result
             }
@@ -295,7 +296,7 @@ impl FromBytes for RedisValue {
                 .ok_or(ParseError::UnexpectedEof)?;
 
             let total_consumed = len_consumed + len;
-            Ok((RedisValue::String(string_bytes.to_vec()), total_consumed))
+            Ok((RedisValue::String(Bytes::copy_from_slice(string_bytes)), total_consumed))
         }
     }
 }
@@ -338,7 +339,7 @@ impl FromBytes for RDBHeader {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct RDBMetaData {
-    pub metadata: HashMap<Vec<u8>, Vec<u8>>,
+    pub metadata: HashMap<Bytes, Bytes>,
 }
 
 impl FromBytes for RDBMetaData {
@@ -373,13 +374,13 @@ impl FromBytes for RDBMetaData {
 
             let key_data = match key {
                 RedisValue::String(data) => data,
-                RedisValue::Integer(data) => data.to_string().as_bytes().to_vec(),
+                RedisValue::Integer(data) => Bytes::copy_from_slice(data.to_string().as_bytes()),
                 _ => return Err(ParseError::InvalidMetadata),
             };
 
             let value_data = match value {
                 RedisValue::String(data) => data,
-                RedisValue::Integer(data) => data.to_string().as_bytes().to_vec(),
+                RedisValue::Integer(data) => Bytes::copy_from_slice(data.to_string().as_bytes()),
                 _ => return Err(ParseError::InvalidMetadata),
             };
 
@@ -402,7 +403,7 @@ pub type DatabaseIndex = usize;
 pub struct RDBDatabase {
     pub database_index: DatabaseIndex,
     pub size_hints: HashTableSizeInfo,
-    pub hash_table: HashMap<Vec<u8>, DatabaseEntry>,
+    pub hash_table: HashMap<Bytes, DatabaseEntry>,
 }
 
 fn parse_db_key_value(
@@ -410,7 +411,7 @@ fn parse_db_key_value(
     total_consumed: &mut usize,
     expiry: Option<KeyExpiry>,
     value_type: ValueType,
-    hash_table: &mut HashMap<Vec<u8>, DatabaseEntry>,
+    hash_table: &mut HashMap<Bytes, DatabaseEntry>,
 ) -> Result<(), ParseError> {
     // Parse key string
     let (key, key_consumed) = RedisValue::from_bytes(remaining)?;
@@ -430,7 +431,7 @@ fn parse_db_key_value(
 
     let key_data = match key {
         RedisValue::String(data) => data,
-        RedisValue::Integer(data) => data.to_string().as_bytes().to_vec(),
+        RedisValue::Integer(data) => Bytes::copy_from_slice(data.to_string().as_bytes()),
         _ => return Err(ParseError::InvalidMetadata),
     };
 
@@ -441,7 +442,7 @@ fn parse_db_key_value(
 
 impl FromBytes for RDBDatabase {
     fn from_bytes(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
-        let mut hash_table = HashMap::new();
+        let mut hash_table: HashMap<Bytes, DatabaseEntry> = HashMap::new();
         let mut remaining = bytes;
         let mut size_hints = HashTableSizeInfo::default();
         let mut total_consumed = 0;

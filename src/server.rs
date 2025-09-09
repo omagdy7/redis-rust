@@ -2,6 +2,7 @@ use crate::rdb::{FromBytes, RDBFile};
 use crate::resp_commands::{ExpiryOption, RedisCommand, SetCondition};
 use crate::resp_parser::{RespType, parse};
 use crate::shared_cache::{Cache, CacheEntry};
+use bytes::Bytes;
 use regex::Regex;
 use std::{collections::HashMap, env, net::SocketAddr, sync::Arc};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -1003,7 +1004,7 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 let matching_keys: Vec<RespType> = cache
                     .keys()
                     .filter(|key| regex.is_match(key))
-                    .map(|key| RespType::BulkString(key.as_bytes().to_vec()))
+                    .map(|key| RespType::BulkString(Bytes::copy_from_slice(key.as_bytes())))
                     .collect();
                 println!("Matched {} keys", matching_keys.len());
 
@@ -1192,7 +1193,7 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                 let matching_keys: Vec<RespType> = cache
                     .keys()
                     .filter(|key| regex.is_match(key))
-                    .map(|key| RespType::BulkString(key.as_bytes().to_vec()))
+                    .map(|key| RespType::BulkString(Bytes::copy_from_slice(key.as_bytes())))
                     .collect();
                 RespType::Array(matching_keys).to_resp_bytes()
             }

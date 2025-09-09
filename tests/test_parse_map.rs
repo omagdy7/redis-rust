@@ -1,4 +1,5 @@
 use codecrafters_redis::resp_parser::*;
+use bytes::Bytes;
 use std::collections::HashMap;
 
 #[test]
@@ -381,7 +382,7 @@ fn test_binary_data_in_bulk_strings() {
     let mut expected_map = HashMap::new();
     expected_map.insert(
         "binary_key".to_string(),
-        RespType::BulkString(vec![0xFF, 0x00, 0xFE]),
+        RespType::BulkString(Bytes::from(vec![0xFF, 0x00, 0xFE])),
     );
 
     assert_eq!(parse_maps(&input).unwrap().0, RespType::Maps(expected_map));
