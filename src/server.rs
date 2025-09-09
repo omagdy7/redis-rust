@@ -1,4 +1,4 @@
-use crate::rdb::{FromBytes, RDBFile};
+use crate::rdb::{FromBytes, RDBFile, RedisValue, ExpiryUnit};
 use crate::resp_commands::{ExpiryOption, RedisCommand, SetCondition};
 use crate::frame::Frame;
 use crate::resp_parser::parse;
@@ -467,9 +467,13 @@ impl SlaveRole for SlaveServer {
                 // really lucky the REPLCONF would all get sent in one TCP segment so I shouldn't
                 // assume I would get nice segments refelecting each command
                 if !rest.is_empty() {
-                    // TODO: Sync the rdb_file with the slave's cache
                     match RDBFile::from_bytes(rest) {
-                        Ok((_rdb_file, bytes_consumed)) => {
+                        Ok((rdb_file, bytes_consumed)) => {
+                            // Sync the rdb_file with the slave's cache
+                            if let Err(e) = self.sync_rdb_to_cache(&rdb_file).await {
+                                eprintln!("Failed to sync RDB to cache: {}", e);
+                                return Err(format!("RDB sync error: {}", e));
+                            }
                             rest = &rest[bytes_consumed..];
                             println!("rdb bytes: {}", bytes_consumed);
                             println!("remaining bytes after rdb: {}", rest.len());
@@ -515,10 +519,13 @@ impl SlaveRole for SlaveServer {
 
                     // Attempt 1: Try to parse an RDB file.
                     // The RDB file is sent as a RESP Bulk String, so it will start with '$'.
-                    if let Ok((_rdb_file, bytes_consumed)) = RDBFile::from_bytes(&processing_buffer)
+                    if let Ok((rdb_file, bytes_consumed)) = RDBFile::from_bytes(&processing_buffer)
                     {
                         println!("Parsed and consumed RDB file of size {}.", bytes_consumed);
-                        // TODO: Sync the rdb_file with the slave's cache here!
+                        // Sync the rdb_file with the slave's cache
+                        if let Err(e) = server_clone.sync_rdb_to_cache(&rdb_file).await {
+                            eprintln!("Failed to sync RDB to cache: {}", e);
+                        }
 
                         processing_buffer.drain(..bytes_consumed);
 
@@ -1317,5 +1324,61 @@ impl SlaveServer {
 
     pub fn get_server_state_mut(&mut self) -> &mut SharedMut<SlaveState> {
         &mut self.state
+    }
+
+    /// Sync the RDB file data with the slave's cache
+    async fn sync_rdb_to_cache(&self, rdb_file: &RDBFile) -> Result<(), String> {
+        let mut cache = self.cache.lock().await;
+
+        // Clear existing cache before syncing
+        cache.clear();
+
+        // Iterate through all databases in the RDB file
+        for (_db_index, database) in &rdb_file.databases {
+            for (key_bytes, entry) in &database.hash_table {
+                // Convert key from Bytes to String
+                let key = match std::str::from_utf8(key_bytes) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => continue, // Skip keys that aren't valid UTF-8
+                };
+
+                // Convert RedisValue to String for cache storage
+                let value = match &entry.value {
+                    RedisValue::String(bytes) => {
+                        match std::str::from_utf8(bytes) {
+                            Ok(s) => s.to_string(),
+                            Err(_) => continue, // Skip values that aren't valid UTF-8
+                        }
+                    }
+                    RedisValue::Integer(i) => i.to_string(),
+                    // For other types, we'll store a string representation
+                    _ => format!("{:?}", entry.value),
+                };
+
+                // Convert expiry time to milliseconds
+                let expires_at = match &entry.expiry {
+                    Some(expiry) => {
+                        let timestamp_ms = match expiry.unit {
+                            ExpiryUnit::Seconds => expiry.timestamp * 1000,
+                            ExpiryUnit::Milliseconds => expiry.timestamp,
+                        };
+                        Some(timestamp_ms)
+                    }
+                    None => None,
+                };
+
+                // Insert into cache
+                cache.insert(
+                    key,
+                    CacheEntry {
+                        value,
+                        expires_at,
+                    },
+                );
+            }
+        }
+
+        println!("Successfully synced {} databases from RDB to cache", rdb_file.databases.len());
+        Ok(())
     }
 }
