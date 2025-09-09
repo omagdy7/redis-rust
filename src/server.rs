@@ -104,7 +104,7 @@ pub enum RedisServer<W: AsyncWrite + Send + Unpin + 'static> {
     Slave(SlaveServer),
 }
 
-trait CommandHandler<W: AsyncWrite + Send + Unpin + 'static> {
+pub trait CommandHandler<W: AsyncWrite + Send + Unpin + 'static> {
     async fn execute(&self, command: RedisCommand) -> Vec<u8>;
 }
 

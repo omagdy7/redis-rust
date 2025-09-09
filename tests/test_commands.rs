@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use bytes::Bytes;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use std::thread;
+use tokio;
 
 use codecrafters_redis::resp_parser::RespType;
 use codecrafters_redis::server::SharedMut;
@@ -10,7 +12,7 @@ use codecrafters_redis::shared_cache::{Cache, CacheEntry};
 // Test Helpers & Mocks
 /// Creates a new, empty shared cache for each test.
 fn new_cache() -> SharedMut<Cache> {
-    Arc::new(Mutex::new(HashMap::<String, CacheEntry>::new()))
+    Arc::new(Mutex::new(Cache::new()))
 }
 
 /// Builds a `RespType::Array` from string slices to simplify parser tests.
@@ -23,8 +25,8 @@ fn build_command_from_str_slice(args: &[&str]) -> RespType {
 }
 
 /// A helper to get a value directly from the cache for assertions.
-fn get_from_cache(cache: &SharedMut<Cache>, key: &str) -> Option<CacheEntry> {
-    cache.lock().unwrap().get(key).cloned()
+async fn get_from_cache(cache: &SharedMut<Cache>, key: &str) -> Option<CacheEntry> {
+    cache.lock().await.get(key).cloned()
 }
 
 /// Tests for the `RedisCommands::from(RespType)` parser logic.
@@ -144,131 +146,126 @@ mod command_parser_tests {
 /// Tests for the command execution logic in `RedisCommands::execute`.
 mod command_execution_tests {
     use codecrafters_redis::resp_commands::RedisCommand;
-    use codecrafters_redis::server::{CanBroadcast, RedisServer};
+    use codecrafters_redis::server::{RedisServer, BoxedAsyncWrite, CommandHandler};
     use std::time::Duration;
 
     use super::*;
 
     /// Helper to parse and execute a command against a cache.
-    fn run_command(cache: &SharedMut<Cache>, args: &[&str]) -> Vec<u8> {
+    async fn run_command(cache: &SharedMut<Cache>, args: &[&str]) -> Vec<u8> {
         let command = RedisCommand::from(build_command_from_str_slice(args));
-        let mut server = RedisServer::new_master();
+        let mut server = RedisServer::<BoxedAsyncWrite>::new_master();
         server.set_cache(cache);
-        let config = server.config();
-        let state = server.get_server_state();
 
-        command.execute(
-            None,
-            server.get_replication_msg_sender(),
-            cache.clone(),
-            config,
-            state,
-        )
+        match server {
+            RedisServer::Master(master) => master.execute(command).await,
+            RedisServer::Slave(_) => panic!("Test uses master"),
+        }
     }
 
-    #[test]
-    fn test_execute_ping() {
+    #[tokio::test]
+    async fn test_execute_ping() {
         let cache = new_cache();
-        let result = run_command(&cache, &["PING"]);
+        let result = run_command(&cache, &["PING"]).await;
         assert_eq!(result, b"+PONG\r\n");
     }
 
-    #[test]
-    fn test_execute_echo() {
+    #[tokio::test]
+    async fn test_execute_echo() {
         let cache = new_cache();
         // Note: the provided code has a bug, it returns a Simple String, not a Bulk String.
         // A correct implementation would return `resp!(bulk "hello")`.
-        let result = run_command(&cache, &["ECHO", "hello"]);
+        let result = run_command(&cache, &["ECHO", "hello"]).await;
         assert_eq!(result, b"+hello\r\n");
     }
 
-    #[test]
-    fn test_execute_get_non_existent() {
+    #[tokio::test]
+    async fn test_execute_get_non_existent() {
         let cache = new_cache();
-        let result = run_command(&cache, &["GET", "mykey"]);
+        let result = run_command(&cache, &["GET", "mykey"]).await;
         assert_eq!(result, b"$-1\r\n"); // Null Bulk String
     }
 
-    #[test]
-    fn test_execute_set_and_get() {
+    #[tokio::test]
+    async fn test_execute_set_and_get() {
         let cache = new_cache();
-        let set_result = run_command(&cache, &["SET", "mykey", "myvalue"]);
+        let set_result = run_command(&cache, &["SET", "mykey", "myvalue"]).await;
         assert_eq!(set_result, b"+OK\r\n");
 
-        let get_result = run_command(&cache, &["GET", "mykey"]);
+        let get_result = run_command(&cache, &["GET", "mykey"]).await;
         assert_eq!(get_result, b"$7\r\nmyvalue\r\n");
     }
 
-    #[test]
-    fn test_execute_set_nx() {
+    #[tokio::test]
+    async fn test_execute_set_nx() {
         let cache = new_cache();
         // Should succeed when key doesn't exist
-        assert_eq!(run_command(&cache, &["SET", "k", "v1", "NX"]), b"+OK\r\n");
-        assert_eq!(get_from_cache(&cache, "k").unwrap().value, "v1");
+        assert_eq!(run_command(&cache, &["SET", "k", "v1", "NX"]).await, b"+OK\r\n");
+        assert_eq!(get_from_cache(&cache, "k").await.unwrap().value, "v1");
 
         // Should fail when key exists
-        assert_eq!(run_command(&cache, &["SET", "k", "v2", "NX"]), b"$-1\r\n");
-        assert_eq!(get_from_cache(&cache, "k").unwrap().value, "v1"); // Value is unchanged
+        assert_eq!(run_command(&cache, &["SET", "k", "v2", "NX"]).await, b"$-1\r\n");
+        assert_eq!(get_from_cache(&cache, "k").await.unwrap().value, "v1"); // Value is unchanged
     }
 
-    #[test]
-    fn test_execute_set_xx() {
+    #[tokio::test]
+    async fn test_execute_set_xx() {
         let cache = new_cache();
         // Should fail when key doesn't exist
-        assert_eq!(run_command(&cache, &["SET", "k", "v1", "XX"]), b"$-1\r\n");
-        assert!(get_from_cache(&cache, "k").is_none());
+        assert_eq!(run_command(&cache, &["SET", "k", "v1", "XX"]).await, b"$-1\r\n");
+        assert!(get_from_cache(&cache, "k").await.is_none());
 
         // Pre-populate and should succeed
-        run_command(&cache, &["SET", "k", "v1"]);
-        assert_eq!(run_command(&cache, &["SET", "k", "v2", "XX"]), b"+OK\r\n");
-        assert_eq!(get_from_cache(&cache, "k").unwrap().value, "v2");
+        run_command(&cache, &["SET", "k", "v1"]).await;
+        assert_eq!(run_command(&cache, &["SET", "k", "v2", "XX"]).await, b"+OK\r\n");
+        assert_eq!(get_from_cache(&cache, "k").await.unwrap().value, "v2");
     }
 
-    #[test]
-    fn test_execute_set_with_get_option() {
+    #[tokio::test]
+    async fn test_execute_set_with_get_option() {
         let cache = new_cache();
-        run_command(&cache, &["SET", "mykey", "old"]);
+        run_command(&cache, &["SET", "mykey", "old"]).await;
 
         // Note: This test will fail with the provided code, which incorrectly returns
         // a Simple String `+old\r\n`. The test correctly expects a Bulk String.
-        let result = run_command(&cache, &["SET", "mykey", "new", "GET"]);
+        let result = run_command(&cache, &["SET", "mykey", "new", "GET"]).await;
         assert_eq!(result, b"$3\r\nold\r\n");
-        assert_eq!(get_from_cache(&cache, "mykey").unwrap().value, "new");
+        assert_eq!(get_from_cache(&cache, "mykey").await.unwrap().value, "new");
     }
 
-    #[test]
-    fn test_execute_set_get_on_non_existent() {
+    #[tokio::test]
+    async fn test_execute_set_get_on_non_existent() {
         let cache = new_cache();
         // Note: This test will fail with the provided code, which incorrectly
         // returns `+OK\r\n`. The spec requires a nil reply.
-        let result = run_command(&cache, &["SET", "mykey", "new", "GET"]);
+        let result = run_command(&cache, &["SET", "mykey", "new", "GET"]).await;
         assert_eq!(result, b"$-1\r\n");
-        assert!(get_from_cache(&cache, "mykey").is_some());
+        assert!(get_from_cache(&cache, "mykey").await.is_some());
     }
 
-    #[test]
-    fn test_expiry_with_px_and_cleanup() {
+    #[tokio::test]
+    async fn test_expiry_with_px_and_cleanup() {
         let cache = new_cache();
-        run_command(&cache, &["SET", "mykey", "val", "PX", "50"]);
+        run_command(&cache, &["SET", "mykey", "val", "PX", "50"]).await;
 
-        assert!(get_from_cache(&cache, "mykey").is_some());
+        assert!(get_from_cache(&cache, "mykey").await.is_some());
         thread::sleep(Duration::from_millis(60));
 
         // GET on an expired key should return nil and trigger cleanup
-        assert_eq!(run_command(&cache, &["GET", "mykey"]), b"$-1\r\n");
-        assert!(get_from_cache(&cache, "mykey").is_none());
+        assert_eq!(run_command(&cache, &["GET", "mykey"]).await, b"$-1\r\n");
+        assert!(get_from_cache(&cache, "mykey").await.is_none());
     }
 
-    #[test]
-    fn test_keepttl() {
+    #[tokio::test]
+    async fn test_keepttl() {
         let cache = new_cache();
-        run_command(&cache, &["SET", "mykey", "v1", "EX", "2"]);
-        let expiry1 = get_from_cache(&cache, "mykey").unwrap().expires_at;
+        run_command(&cache, &["SET", "mykey", "v1", "EX", "2"]).await;
+        let expiry1 = get_from_cache(&cache, "mykey").await.unwrap().expires_at;
 
         thread::sleep(Duration::from_millis(100));
-        run_command(&cache, &["SET", "mykey", "v2", "KEEPTTL"]);
+        run_command(&cache, &["SET", "mykey", "v2", "KEEPTTL"]).await;
 
-        let entry2 = get_from_cache(&cache, "mykey").unwrap();
+        let entry2 = get_from_cache(&cache, "mykey").await.unwrap();
         assert_eq!(entry2.value, "v2"); // Value is updated
         assert_eq!(entry2.expires_at, expiry1); // TTL is retained
     }
