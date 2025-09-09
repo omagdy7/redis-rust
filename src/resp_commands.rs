@@ -1,4 +1,4 @@
-use crate::resp_parser::*;
+use crate::frame::Frame;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
@@ -104,9 +104,9 @@ impl SetCommand {
 }
 
 // Helper function to extract string from BulkString
-fn extract_string(resp: &RespType) -> Option<String> {
+fn extract_string(resp: &Frame) -> Option<String> {
     match resp {
-        RespType::BulkString(bytes) => str::from_utf8(bytes).ok().map(|s| s.to_owned()),
+        Frame::BulkString(bytes) => str::from_utf8(bytes).ok().map(|s| s.to_owned()),
         _ => None,
     }
 }
@@ -226,10 +226,10 @@ impl SetOptionParser {
     }
 }
 
-impl From<RespType> for RedisCommand {
-    fn from(value: RespType) -> Self {
-        // Alternative approach using a more functional style with iterators
-        let RespType::Array(command) = value else {
+impl From<Frame> for RedisCommand {
+    fn from(value: Frame) -> Self {
+        // Any command is a Frame::Array so we make sure it is
+        let Frame::Array(command) = value else {
             return Self::Invalid;
         };
 

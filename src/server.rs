@@ -1,6 +1,7 @@
 use crate::rdb::{FromBytes, RDBFile};
 use crate::resp_commands::{ExpiryOption, RedisCommand, SetCondition};
-use crate::resp_parser::{RespType, parse};
+use crate::frame::Frame;
+use crate::resp_parser::parse;
 use crate::shared_cache::{Cache, CacheEntry};
 use bytes::Bytes;
 use regex::Regex;
@@ -452,7 +453,7 @@ impl SlaveRole for SlaveServer {
                 let (parsed, mut rest) = parse(&buffer[..bytes_read])
                     .map_err(|e| format!("Failed to parse FULLRESYNC: {:?}", e))?;
                 match parsed {
-                    RespType::SimpleString(s) if s.starts_with("FULLRESYNC") => {
+                    Frame::SimpleString(s) if s.starts_with("FULLRESYNC") => {
                         // Expected response
                     }
                     _ => return Err("Invalid FULLRESYNC response".to_string()),
@@ -1010,14 +1011,14 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                     Ok(regex) => regex,
                     Err(_) => return resp_bytes!(error "ERR invalid regex pattern"),
                 };
-                let matching_keys: Vec<RespType> = cache
+                let matching_keys: Vec<Frame> = cache
                     .keys()
                     .filter(|key| regex.is_match(key))
-                    .map(|key| RespType::BulkString(Bytes::copy_from_slice(key.as_bytes())))
+                    .map(|key| Frame::BulkString(Bytes::copy_from_slice(key.as_bytes())))
                     .collect();
                 println!("Matched {} keys", matching_keys.len());
 
-                RespType::Array(matching_keys).to_resp_bytes()
+                Frame::Array(matching_keys).to_resp_bytes()
             }
             RC::Info(_sub_command) => {
                 println!("Received INFO command");
@@ -1202,12 +1203,12 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                     Ok(regex) => regex,
                     Err(_) => return resp_bytes!(error "ERR invalid regex pattern"),
                 };
-                let matching_keys: Vec<RespType> = cache
+                let matching_keys: Vec<Frame> = cache
                     .keys()
                     .filter(|key| regex.is_match(key))
-                    .map(|key| RespType::BulkString(Bytes::copy_from_slice(key.as_bytes())))
+                    .map(|key| Frame::BulkString(Bytes::copy_from_slice(key.as_bytes())))
                     .collect();
-                RespType::Array(matching_keys).to_resp_bytes()
+                Frame::Array(matching_keys).to_resp_bytes()
             }
             RC::Info(_sub_command) => {
                 // Slaves respond with their role

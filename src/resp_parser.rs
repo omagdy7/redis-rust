@@ -8,11 +8,11 @@ use std::{
     io::Read,
     isize,
 };
+
+use crate::frame::Frame;
 use bytes::Bytes;
 
-//  TODO: [ ] Refactor this mess and find a better way to merge the RespType and RedisValue type??
-//  TODO: [ ] Find a better way to convert from RespType to bytes and vice versa
-//  TODO: [ ] Refactor the use of Vec<u8> to the bytes crate
+//  TODO: [ ] Find a better way to convert from Frame to bytes and vice versa
 
 pub const SIMPLE_STRING: u8 = b'+';
 pub const SIMPLE_ERROR: u8 = b'-';
@@ -209,7 +209,7 @@ impl fmt::Display for RespError {
 
 impl Error for RespError {}
 
-pub fn parse_simple_strings(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
+pub fn parse_simple_strings(bytes: &[u8]) -> Result<(Frame, &[u8]), RespError> {
     match bytes {
         [first, rest @ ..] => {
             if *first != SIMPLE_STRING {
@@ -226,14 +226,14 @@ pub fn parse_simple_strings(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError
                 return Err(RespError::InvalidValue);
             }
 
-            let consumed = RespType::SimpleString(String::from_utf8_lossy(consumed).to_string());
+            let consumed = Frame::SimpleString(String::from_utf8_lossy(consumed).to_string());
             return Ok((consumed, remained));
         }
         [] => Err(RespError::Custom(String::from("Empty data"))),
     }
 }
 
-pub fn parse_simple_errors(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
+pub fn parse_simple_errors(bytes: &[u8]) -> Result<(Frame, &[u8]), RespError> {
     match bytes {
         [first, rest @ ..] => {
             if *first != SIMPLE_ERROR {
@@ -250,14 +250,14 @@ pub fn parse_simple_errors(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError>
                 return Err(RespError::InvalidValue);
             }
 
-            let consumed = RespType::SimpleError(String::from_utf8_lossy(consumed).to_string());
+            let consumed = Frame::SimpleError(String::from_utf8_lossy(consumed).to_string());
             return Ok((consumed, remained));
         }
         [] => Err(RespError::Custom(String::from("Empty data"))),
     }
 }
 
-pub fn parse_integers(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
+pub fn parse_integers(bytes: &[u8]) -> Result<(Frame, &[u8]), RespError> {
     match bytes {
         [first, rest @ ..] => {
             if *first != INTEGER {
@@ -271,16 +271,16 @@ pub fn parse_integers(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
                 .ok_or(RespError::UnexpectedEnd)?;
 
             let parsed_int = String::from_utf8_lossy(consumed)
-                .parse::<u64>()
+                .parse::<i64>()
                 .map_err(|_| RespError::InvalidValue)?;
-            let consumed = RespType::Integer(parsed_int);
+            let consumed = Frame::Integer(parsed_int);
             return Ok((consumed, remained));
         }
         [] => Err(RespError::Custom(String::from("Empty data"))),
     }
 }
 
-pub fn parse(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
+pub fn parse(bytes: &[u8]) -> Result<(Frame, &[u8]), RespError> {
     match bytes[0] {
         SIMPLE_STRING => {
             let (parsed, remain) = parse_simple_strings(bytes)?;
@@ -323,7 +323,7 @@ pub fn parse(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
     }
 }
 
-pub fn parse_array(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
+pub fn parse_array(bytes: &[u8]) -> Result<(Frame, &[u8]), RespError> {
     match bytes {
         [first, rest @ ..] => {
             if *first != ARRAY {
@@ -340,7 +340,7 @@ pub fn parse_array(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
                 .parse::<u64>()
                 .map_err(|_| RespError::InvalidValue)?;
 
-            let mut array: Vec<RespType> = Vec::with_capacity(length as usize);
+            let mut array: Vec<Frame> = Vec::with_capacity(length as usize);
 
             for _ in 0..length {
                 if !remained.is_empty() {
@@ -354,7 +354,7 @@ pub fn parse_array(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
                 return Err(RespError::UnexpectedEnd);
             }
 
-            let consumed = RespType::Array(array);
+            let consumed = Frame::Array(array);
 
             return Ok((consumed, remained));
         }
@@ -362,7 +362,7 @@ pub fn parse_array(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
     }
 }
 
-pub fn parse_bulk_strings(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
+pub fn parse_bulk_strings(bytes: &[u8]) -> Result<(Frame, &[u8]), RespError> {
     match bytes {
         [first, rest @ ..] => {
             if *first != BULK_STRING {
@@ -380,7 +380,7 @@ pub fn parse_bulk_strings(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> 
                 .map_err(|_| RespError::InvalidValue)?;
 
             if length == -1 {
-                return Ok((RespType::Null(), remained));
+                return Ok((Frame::Null, remained));
             }
 
             if length < 0 {
@@ -398,16 +398,13 @@ pub fn parse_bulk_strings(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> 
                 return Err(RespError::UnexpectedEnd);
             }
 
-            Ok((
-                RespType::BulkString(bulk_string),
-                &remaining_after_string[2..],
-            ))
+            Ok((Frame::BulkString(bulk_string), &remaining_after_string[2..]))
         }
         [] => Err(RespError::Custom(String::from("Empty data"))),
     }
 }
 
-pub fn parse_nulls(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
+pub fn parse_nulls(bytes: &[u8]) -> Result<(Frame, &[u8]), RespError> {
     match bytes {
         [first, rest @ ..] => {
             if *first != NULL {
@@ -424,14 +421,14 @@ pub fn parse_nulls(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
                 return Err(RespError::InvalidValue);
             }
 
-            let consumed = RespType::Null();
+            let consumed = Frame::Null;
             return Ok((consumed, remained));
         }
         [] => Err(RespError::Custom(String::from("Empty data"))),
     }
 }
 
-pub fn parse_boolean(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
+pub fn parse_boolean(bytes: &[u8]) -> Result<(Frame, &[u8]), RespError> {
     match bytes {
         [first, rest @ ..] => {
             if *first != BOOLEAN {
@@ -456,14 +453,14 @@ pub fn parse_boolean(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
                 return Err(RespError::UnexpectedEnd);
             }
 
-            let consumed = RespType::Boolean(val);
+            let consumed = Frame::Boolean(val);
             return Ok((consumed, remained));
         }
         [] => Err(RespError::Custom(String::from("Empty data"))),
     }
 }
 
-pub fn parse_doubles(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
+pub fn parse_doubles(bytes: &[u8]) -> Result<(Frame, &[u8]), RespError> {
     match bytes {
         [first, rest @ ..] => {
             if *first != DOUBLES {
@@ -479,14 +476,14 @@ pub fn parse_doubles(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
             let parsed_double = String::from_utf8_lossy(consumed)
                 .parse::<f64>()
                 .map_err(|_| RespError::InvalidValue)?;
-            let consumed = RespType::Doubles(parsed_double);
+            let consumed = Frame::Double(parsed_double);
             return Ok((consumed, remained));
         }
         [] => Err(RespError::Custom(String::from("Empty data"))),
     }
 }
 
-pub fn parse_maps(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
+pub fn parse_maps(bytes: &[u8]) -> Result<(Frame, &[u8]), RespError> {
     match bytes {
         [first, rest @ ..] => {
             if *first != MAPS {
@@ -505,26 +502,24 @@ pub fn parse_maps(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
                 .parse::<u64>()
                 .map_err(|_| RespError::InvalidValue)?;
 
-            let mut map: HashMap<String, RespType> = HashMap::new();
+            let mut map: HashMap<String, Frame> = HashMap::new();
 
             let mut key_set: HashSet<String> = HashSet::new();
 
             // I mean this is pretty unredable but it is what it is :/
             // The redundant !remained.is_empty() is because the parse function should handle the
-            // empty bytes but that would mean I refactor the parse to return and (Option<RespType>, &[u8])
+            // empty bytes but that would mean I refactor the parse to return and (Option<Frame>, &[u8])
             // Which is kind of a lot of work now so this works for now I should probably do this for arrray parsing I think
             for _ in 0..length {
                 if !remained.is_empty() {
                     if !remained.is_empty() {
                         let (key, rest) = parse(remained)?;
-                        key_set.insert(key.to_resp_string());
-                        dbg!(&key);
+                        key_set.insert(key.as_string().unwrap_or_default().to_string());
                         remained = rest;
                         if !remained.is_empty() {
                             let (value, rest) = parse(remained)?;
-                            dbg!(&value);
                             remained = rest;
-                            map.insert(key.to_resp_string(), value);
+                            map.insert(key.as_string().unwrap_or_default().to_string(), value);
                         }
                     }
                 }
@@ -536,7 +531,7 @@ pub fn parse_maps(bytes: &[u8]) -> Result<(RespType, &[u8]), RespError> {
                 return Err(RespError::UnexpectedEnd);
             }
 
-            let consumed = RespType::Maps(map);
+            let consumed = Frame::Map(map);
 
             return Ok((consumed, remained));
         }
@@ -566,225 +561,4 @@ pub fn parse_attributes() {
 
 pub fn parse_pushes() {
     todo!()
-}
-
-#[derive(Debug, Clone)]
-pub enum RespType {
-    SimpleString(String),            // +
-    SimpleError(String),             // -
-    Integer(u64),                    // :
-    BulkString(Bytes),             // $
-    Array(Vec<RespType>),            // *
-    Null(),                          // _
-    Boolean(bool),                   // #
-    Doubles(f64),                    // ,
-    BigNumbers(String),              // (
-    BulkErrors(Vec<RespType>),       // !
-    VerbatimStrings(Vec<RespType>),  // =
-    Maps(HashMap<String, RespType>), // %
-    Attributes(Vec<RespType>),       // |
-    Sets(HashSet<String>),           // ~
-    Pushes(Vec<RespType>),           // >
-}
-
-impl RespType {
-    pub fn to_resp_bytes(&self) -> Vec<u8> {
-        match self {
-            RespType::SimpleString(s) => format!("+{}\r\n", s).into_bytes(),
-            RespType::SimpleError(s) => format!("-{}\r\n", s).into_bytes(),
-            RespType::Integer(i) => format!(":{}\r\n", i).into_bytes(),
-            RespType::BulkString(bytes) => {
-                let len = bytes.len();
-                let s = String::from_utf8_lossy(bytes.as_ref());
-                format!("${}\r\n{}\r\n", len, s).into_bytes()
-            }
-            RespType::Array(arr) => {
-                let len = arr.len();
-                let elements = arr
-                    .iter()
-                    .flat_map(|e| String::from_utf8(e.to_resp_bytes()))
-                    .collect::<String>();
-                // TODO: Implement proper Display for elements because this will definitely not
-                // work
-                format!("*{}\r\n{}", len, elements).into_bytes()
-            }
-            // this is just a hack because the platform uses RESP2 in RESP3 it should be "_\r\n"
-            RespType::Null() => b"$-1\r\n".into(),
-            RespType::Boolean(b) => format!("#{}\r\n", if *b { "t" } else { "f" }).into_bytes(),
-            RespType::Doubles(d) => format!(",{}\r\n", d).into_bytes(),
-            RespType::BigNumbers(n) => format!("({}\r\n", n).into_bytes(),
-            RespType::BulkErrors(errors) => {
-                todo!()
-            }
-            RespType::VerbatimStrings(strings) => {
-                todo!()
-            }
-            RespType::Maps(map) => {
-                todo!()
-            }
-            RespType::Attributes(attrs) => {
-                todo!()
-            }
-            RespType::Sets(set) => {
-                todo!()
-            }
-            RespType::Pushes(pushes) => {
-                todo!()
-            }
-        }
-    }
-
-    pub fn to_resp_string(&self) -> String {
-        match self {
-            RespType::SimpleString(s) => format!("{}", s),
-            RespType::SimpleError(s) => format!("{}", s),
-            RespType::Integer(i) => format!("{}", i),
-            RespType::BulkString(bytes) => {
-                let s = String::from_utf8_lossy(bytes.as_ref());
-                format!("{}", s)
-            }
-            RespType::Array(arr) => {
-                let elements = arr
-                    .iter()
-                    .map(|e| e.to_resp_bytes())
-                    .collect::<Vec<Vec<u8>>>();
-                // TODO: Implement proper Display for elements because this will definitely not
-                // work
-                format!("{:?}", elements)
-            }
-            // this is just a hack because the platform uses RESP2 in RESP3 it should be "_\r\n"
-            RespType::Null() => "-1".to_string(),
-            RespType::Boolean(b) => format!("{}", if *b { "t" } else { "f" }),
-            RespType::Doubles(d) => format!("{}", d),
-            RespType::BigNumbers(n) => format!("{}", n),
-            RespType::Maps(map) => {
-                let pairs: Vec<String> = map
-                    .iter()
-                    .map(|(key, value)| format!("{}: {}", key, value.to_resp_string()))
-                    .collect();
-                format!("{{{}}}", pairs.join(", "))
-            }
-            RespType::BulkErrors(errors) => {
-                todo!()
-            }
-            RespType::VerbatimStrings(strings) => {
-                todo!()
-            }
-            RespType::Attributes(attrs) => {
-                todo!()
-            }
-            RespType::Sets(set) => {
-                todo!()
-            }
-            RespType::Pushes(pushes) => {
-                todo!()
-            }
-        }
-    }
-}
-
-impl PartialEq for RespType {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (RespType::SimpleString(a), RespType::SimpleString(b)) => a == b,
-            (RespType::SimpleError(a), RespType::SimpleError(b)) => a == b,
-            (RespType::Integer(a), RespType::Integer(b)) => a == b,
-            (RespType::BulkString(a), RespType::BulkString(b)) => a.as_ref() == b.as_ref(),
-            (RespType::Array(a), RespType::Array(b)) => a == b,
-            (RespType::Null(), RespType::Null()) => true,
-            (RespType::Boolean(a), RespType::Boolean(b)) => a == b,
-            (RespType::Doubles(a), RespType::Doubles(b)) => a == b,
-            (RespType::BigNumbers(a), RespType::BigNumbers(b)) => a == b,
-            (RespType::BulkErrors(a), RespType::BulkErrors(b)) => a == b,
-            (RespType::VerbatimStrings(a), RespType::VerbatimStrings(b)) => a == b,
-            (RespType::Maps(a), RespType::Maps(b)) => a == b,
-            (RespType::Attributes(a), RespType::Attributes(b)) => a == b,
-            // (RespType::Sets(a), RespType::Sets(b)) => a == b,
-            (RespType::Pushes(a), RespType::Pushes(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
-impl PartialEq<&str> for RespType {
-    fn eq(&self, other: &&str) -> bool {
-        match self {
-            RespType::SimpleString(s) => s == other,
-            RespType::SimpleError(s) => s == other,
-            RespType::BigNumbers(s) => s == other,
-            RespType::BulkString(bytes) => {
-                for (b1, b2) in bytes.as_ref().iter().zip(other.as_bytes().iter()) {
-                    if b1 != b2 {
-                        return false;
-                    }
-                }
-                return true;
-            }
-            _ => false,
-        }
-    }
-}
-
-impl PartialEq<str> for RespType {
-    fn eq(&self, other: &str) -> bool {
-        match self {
-            RespType::SimpleString(s) => s == other,
-            RespType::SimpleError(s) => s == other,
-            RespType::BigNumbers(s) => s == other,
-            RespType::BulkString(bytes) => {
-                if let Ok(s) = std::str::from_utf8(bytes.as_ref()) {
-                    *s == *other
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        }
-    }
-}
-
-impl PartialEq<String> for RespType {
-    fn eq(&self, other: &String) -> bool {
-        match self {
-            RespType::SimpleString(s) => s == other,
-            RespType::SimpleError(s) => s == other,
-            RespType::BigNumbers(s) => s == other,
-            RespType::BulkString(bytes) => {
-                for (b1, b2) in bytes.as_ref().iter().zip(other.as_bytes().iter()) {
-                    if b1 != b2 {
-                        return false;
-                    }
-                }
-                return true;
-            }
-            _ => false,
-        }
-    }
-}
-
-impl PartialEq<u64> for RespType {
-    fn eq(&self, other: &u64) -> bool {
-        match self {
-            RespType::Integer(i) => i == other,
-            _ => false,
-        }
-    }
-}
-
-impl PartialEq<bool> for RespType {
-    fn eq(&self, other: &bool) -> bool {
-        match self {
-            RespType::Boolean(b) => b == other,
-            _ => false,
-        }
-    }
-}
-
-impl PartialEq<f64> for RespType {
-    fn eq(&self, other: &f64) -> bool {
-        match self {
-            RespType::Doubles(d) => d == other,
-            _ => false,
-        }
-    }
 }

@@ -20,7 +20,8 @@ use codecrafters_redis::{
 };
 use codecrafters_redis::{resp_commands::RedisCommand, server::RedisServer};
 use codecrafters_redis::{
-    resp_parser::{RespType, parse},
+    frame::Frame,
+    resp_parser::parse,
     server::SlaveServer,
 };
 use tokio::sync::Mutex;
