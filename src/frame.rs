@@ -36,6 +36,14 @@ impl fmt::Display for StreamId {
 pub enum ParseStreamIdError {
     MissingPart,
     InvalidNumber,
+    InvalidAuto,
+}
+
+#[derive(Debug, Clone)]
+pub enum ParsedStreamId {
+    Literal(StreamId),
+    AutoSequence { ms_time: u64 },
+    Auto,
 }
 
 impl FromStr for StreamId {
@@ -54,6 +62,33 @@ impl FromStr for StreamId {
             .parse::<u64>()
             .map_err(|_| ParseStreamIdError::InvalidNumber)?;
         Ok(StreamId { ms_time, seq })
+    }
+}
+
+impl FromStr for ParsedStreamId {
+    type Err = ParseStreamIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "*" {
+            return Ok(ParsedStreamId::Auto);
+        }
+
+        let mut parts = s.splitn(2, '-');
+        let ms_part = parts.next().ok_or(ParseStreamIdError::MissingPart)?;
+        let seq_part = parts.next().ok_or(ParseStreamIdError::MissingPart)?;
+
+        match (ms_part, seq_part) {
+            (ms_str, "*") => {
+                let ms_time = ms_str.parse::<u64>().map_err(|_| ParseStreamIdError::InvalidNumber)?;
+                Ok(ParsedStreamId::AutoSequence { ms_time })
+            }
+            (ms_str, seq_str) if seq_str != "*" => {
+                let ms_time = ms_str.parse::<u64>().map_err(|_| ParseStreamIdError::InvalidNumber)?;
+                let seq = seq_str.parse::<u64>().map_err(|_| ParseStreamIdError::InvalidNumber)?;
+                Ok(ParsedStreamId::Literal(StreamId { ms_time, seq }))
+            }
+            _ => Err(ParseStreamIdError::InvalidAuto),
+        }
     }
 }
 

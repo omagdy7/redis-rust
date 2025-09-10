@@ -1,4 +1,4 @@
-use crate::frame::{Frame, StreamEntry, StreamId};
+use crate::frame::{Frame, ParsedStreamId};
 use std::{
     collections::HashMap,
     time::{SystemTime, UNIX_EPOCH},
@@ -127,7 +127,7 @@ pub enum RedisCommand {
     ReplConf((String, String)),
     Psync((String, String)),
     Wait((String, String)),
-    Xadd { key: String, stream: StreamEntry },
+    Xadd { key: String, parsed_id: ParsedStreamId, fields: HashMap<String, String> },
     Invalid,
 }
 
@@ -288,14 +288,15 @@ impl From<Frame> for RedisCommand {
                     return Self::Invalid;
                 };
 
-                let id: StreamId = stream_id.parse().unwrap();
+                let parsed_id: ParsedStreamId = stream_id.parse().unwrap();
                 let mut fields: HashMap<String, String> = HashMap::new();
-                while let (Some(key), Some(value)) = (args.next(), args.next()) {
-                    fields.insert(key, value);
+                while let (Some(field_key), Some(value)) = (args.next(), args.next()) {
+                    fields.insert(field_key, value);
                 }
                 Self::Xadd {
                     key: key,
-                    stream: StreamEntry::new(id, fields),
+                    parsed_id,
+                    fields,
                 }
             }
             "TYPE" => match args.next() {

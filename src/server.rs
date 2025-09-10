@@ -1,4 +1,5 @@
 use crate::frame::Frame;
+use crate::frame::{ParsedStreamId, StreamEntry, StreamId};
 use crate::rdb::{ExpiryUnit, FromBytes, RDBFile, RedisValue};
 use crate::resp_commands::{ExpiryOption, RedisCommand, SetCondition};
 use crate::resp_parser::parse;
@@ -880,6 +881,57 @@ impl<W: AsyncWrite + Send + Unpin> MasterServer<W> {
 impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<W> {
     async fn execute(&self, command: RedisCommand) -> Vec<u8> {
         use RedisCommand as RC;
+
+        fn resolve_stream_id(
+            parsed_id: ParsedStreamId,
+            last_id: Option<StreamId>,
+        ) -> Result<StreamId, String> {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+
+            match parsed_id {
+                ParsedStreamId::Literal(id) => Ok(id),
+                ParsedStreamId::AutoSequence { ms_time } => {
+                    if let Some(last) = last_id {
+                        if last.ms_time == ms_time {
+                            Ok(StreamId {
+                                ms_time,
+                                seq: last.seq + 1,
+                            })
+                        } else {
+                            // For different timestamp, start from 0, but ensure it's not 0-0
+                            let seq = if ms_time == 0 { 1 } else { 0 };
+                            Ok(StreamId { ms_time, seq })
+                        }
+                    } else {
+                        // No previous entries, ensure it's not 0-0
+                        let seq = if ms_time == 0 { 1 } else { 0 };
+                        Ok(StreamId { ms_time, seq })
+                    }
+                }
+                ParsedStreamId::Auto => {
+                    if let Some(last) = last_id {
+                        if last.ms_time == now {
+                            Ok(StreamId {
+                                ms_time: now,
+                                seq: last.seq + 1,
+                            })
+                        } else {
+                            // For different timestamp, start from 0, but ensure it's not 0-0
+                            let seq = if now == 0 { 1 } else { 0 };
+                            Ok(StreamId { ms_time: now, seq })
+                        }
+                    } else {
+                        // No previous entries, ensure it's not 0-0
+                        let seq = if now == 0 { 1 } else { 0 };
+                        Ok(StreamId { ms_time: now, seq })
+                    }
+                }
+            }
+        }
+
         match command {
             RC::Ping => {
                 info!("Received PING command");
@@ -1024,34 +1076,52 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                     }
                 }
             }
-            RC::Xadd { key, stream } => {
+            RC::Xadd {
+                key,
+                parsed_id,
+                fields,
+            } => {
                 info!("Received XADD command for key: {}", key);
                 info!("Attempting to lock cache for SET");
                 let mut cache = self.cache.lock().await;
                 info!("Cache lock acquired for SET");
 
-                let stream_id = stream.id.to_string();
+                // Get the last stream entry to determine the next ID
+                let last_id = if let Some(entry) = cache.get(&key) {
+                    if let Frame::Stream(ref vec) = entry.value {
+                        vec.last().map(|e| e.id)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                let stream_id = match resolve_stream_id(parsed_id, last_id) {
+                    Ok(id) => id,
+                    Err(e) => return resp_bytes!(error e),
+                };
+
+                let stream_entry = StreamEntry::new(stream_id, fields);
 
                 if let Some(entry) = cache.get_mut(&key) {
                     if let Frame::Stream(ref mut vec) = entry.value {
-                        // It's safe to unwrap because if I am here it means there is at least one
-                        // StreamEntry in the vector
-                        if stream_id == "0-0" {
+                        if stream_id == (StreamId { ms_time: 0, seq: 0 }) {
                             return resp_bytes!(error "ERR The ID specified in XADD must be greater than 0-0");
                         }
-                        if stream.id <= vec.last().unwrap().id {
+                        if stream_id <= vec.last().unwrap().id {
                             return resp_bytes!(error "ERR The ID specified in XADD is equal or smaller than the target stream top item");
                         } else {
-                            vec.push(stream);
+                            vec.push(stream_entry);
                         }
                     } else {
-                        entry.value = Frame::Stream(vec![stream]);
+                        entry.value = Frame::Stream(vec![stream_entry]);
                     }
                 } else {
                     cache.insert(
                         key.clone(),
                         CacheEntry {
-                            value: Frame::Stream(vec![stream]),
+                            value: Frame::Stream(vec![stream_entry]),
                             expires_at: None,
                         },
                     );
@@ -1060,9 +1130,8 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 info!("Inserted/key {}", key);
 
                 drop(cache);
-                info!("Released cache lock for XADD");
 
-                resp_bytes!(bulk stream_id)
+                resp_bytes!(bulk stream_id.to_string())
             }
             RC::ConfigGet(s) => {
                 info!("Received CONFIG GET for key: {}", s);
@@ -1317,7 +1386,13 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                 // Slaves do not propagate writes and typically respond with OK.
                 resp_bytes!("OK")
             }
-            RC::Xadd { key, stream } => todo!(),
+            RC::Xadd {
+                key,
+                parsed_id,
+                fields,
+            } => {
+                todo!("Implement XADD for slaves")
+            }
             RC::ReplConf((op1, op2)) => {
                 if op1.to_uppercase() == "GETACK" && op2 == "*" {
                     let state = self.state.lock().await;
