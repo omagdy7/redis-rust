@@ -1032,14 +1032,31 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
 
                 let stream_id = stream.id.to_string();
 
-                // Set the value
-                cache.insert(
-                    key.clone(),
-                    CacheEntry {
-                        value: Frame::Stream(vec![stream]),
-                        expires_at: None,
-                    },
-                );
+                if let Some(entry) = cache.get_mut(&key) {
+                    if let Frame::Stream(ref mut vec) = entry.value {
+                        // It's safe to unwrap because if I am here it means there is at least one
+                        // StreamEntry in the vector
+                        if stream_id == "0-0" {
+                            return resp_bytes!(error "ERR The ID specified in XADD must be greater than 0-0");
+                        }
+                        if stream.id <= vec.last().unwrap().id {
+                            return resp_bytes!(error "ERR The ID specified in XADD is equal or smaller than the target stream top item");
+                        } else {
+                            vec.push(stream);
+                        }
+                    } else {
+                        entry.value = Frame::Stream(vec![stream]);
+                    }
+                } else {
+                    cache.insert(
+                        key.clone(),
+                        CacheEntry {
+                            value: Frame::Stream(vec![stream]),
+                            expires_at: None,
+                        },
+                    );
+                }
+
                 info!("Inserted/key {}", key);
 
                 drop(cache);

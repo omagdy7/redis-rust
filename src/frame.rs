@@ -5,10 +5,25 @@ use std::str::FromStr;
 
 use crate::rdb;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StreamId {
     pub ms_time: u64,
     pub seq: u64,
+}
+
+impl PartialOrd for StreamId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for StreamId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match self.ms_time.cmp(&other.ms_time) {
+            std::cmp::Ordering::Equal => self.seq.cmp(&other.seq),
+            ord => ord,
+        }
+    }
 }
 
 impl fmt::Display for StreamId {
