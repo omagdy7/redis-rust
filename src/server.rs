@@ -10,6 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify, mpsc::Sender};
 use tokio::time::Duration;
+use tracing::{debug, error, info, warn};
 
 // function for debugging purposes
 pub fn bytes_to_ascii(bytes: &[u8]) -> String {
@@ -459,9 +460,9 @@ impl SlaveRole for SlaveServer {
                     _ => return Err("Invalid FULLRESYNC response".to_string()),
                 }
 
-                println!("rest: {}", bytes_to_ascii(rest));
+                info!("rest: {}", bytes_to_ascii(rest));
 
-                println!("FULLRESYNC response bytes read: {}", bytes_read);
+                info!("FULLRESYNC response bytes read: {}", bytes_read);
 
                 // So there is an interesting behaviour where the FULLRESYNC + RDB and if you are
                 // really lucky the REPLCONF would all get sent in one TCP segment so I shouldn't
@@ -471,15 +472,15 @@ impl SlaveRole for SlaveServer {
                         Ok((rdb_file, bytes_consumed)) => {
                             // Sync the rdb_file with the slave's cache
                             if let Err(e) = self.sync_rdb_to_cache(&rdb_file).await {
-                                eprintln!("Failed to sync RDB to cache: {}", e);
+                                error!("Failed to sync RDB to cache: {}", e);
                                 return Err(format!("RDB sync error: {}", e));
                             }
                             rest = &rest[bytes_consumed..];
-                            println!("rdb bytes: {}", bytes_consumed);
-                            println!("remaining bytes after rdb: {}", rest.len());
+                            info!("rdb bytes: {}", bytes_consumed);
+                            info!("remaining bytes after rdb: {}", rest.len());
                         }
                         Err(e) => {
-                            eprintln!("Failed to parse RDB file: {}", e);
+                            error!("Failed to parse RDB file: {}", e);
                             return Err(format!("RDB parsing error: {}", e));
                         }
                     }
@@ -498,14 +499,14 @@ impl SlaveRole for SlaveServer {
     }
 
     async fn start_replication_handler(self, initial_data: Vec<u8>) -> Result<(), String> {
-        println!("In start replication handler");
+        info!("In start replication handler");
         let state = self.state.clone();
         let server_clone = self.clone(); // Clone self to pass to execute
 
         // Spawn the background listener thread
         tokio::spawn(async move {
             let result = async {
-            println!("Inside the tokio replication handler task");
+            info!("Inside the tokio replication handler task");
 
             // This is our persistent buffer. It starts with the leftover data from the handshake.
             let mut processing_buffer = initial_data;
@@ -521,10 +522,10 @@ impl SlaveRole for SlaveServer {
                     // The RDB file is sent as a RESP Bulk String, so it will start with '$'.
                     if let Ok((rdb_file, bytes_consumed)) = RDBFile::from_bytes(&processing_buffer)
                     {
-                        println!("Parsed and consumed RDB file of size {}.", bytes_consumed);
+                        info!("Parsed and consumed RDB file of size {}.", bytes_consumed);
                         // Sync the rdb_file with the slave's cache
                         if let Err(e) = server_clone.sync_rdb_to_cache(&rdb_file).await {
-                            eprintln!("Failed to sync RDB to cache: {}", e);
+                            error!("Failed to sync RDB to cache: {}", e);
                         }
 
                         processing_buffer.drain(..bytes_consumed);
@@ -537,8 +538,8 @@ impl SlaveRole for SlaveServer {
                     if let Ok((resp, leftover)) = parse(&processing_buffer) {
                         // A command was successfully parsed.
                         let command_size = processing_buffer.len() - leftover.len();
-                        println!("Successfully parsed a command of size {}", command_size);
-                        println!("Command from master: {:?}", resp);
+                        info!("Successfully parsed a command of size {}", command_size);
+                        info!("Command from master: {:?}", resp);
 
                         let command = RedisCommand::from(resp);
 
@@ -552,7 +553,7 @@ impl SlaveRole for SlaveServer {
                         .await;
 
                         if needs_reply && !response.is_empty() {
-                            println!("Slave responding to master: {}", bytes_to_ascii(&response));
+                            info!("Slave responding to master: {}", bytes_to_ascii(&response));
                             let master_connection = {
                                 let state_guard = state.lock().await;
                                 state_guard.connection.clone()
@@ -570,7 +571,7 @@ impl SlaveRole for SlaveServer {
                         {
                             let mut state_guard = state.lock().await;
                             state_guard.master_repl_offset += command_size;
-                            println!("Slave offset is now: {}", state_guard.master_repl_offset);
+                            info!("Slave offset is now: {}", state_guard.master_repl_offset);
                         }
 
                         // Remove the processed command from the front of the buffer.
@@ -580,7 +581,7 @@ impl SlaveRole for SlaveServer {
 
                     // If we reach here, neither parser could complete.
                     // We have incomplete data. Break the inner loop to read more.
-                    println!("Incomplete data in buffer, waiting for more from master.");
+                    info!("Incomplete data in buffer, waiting for more from master.");
                     break 'processing;
                 }
 
@@ -606,14 +607,14 @@ impl SlaveRole for SlaveServer {
                     return Err("No connection to master found.".to_string());
                 };
 
-                println!("Read {} new bytes from master.", bytes_read);
+                info!("Read {} new bytes from master.", bytes_read);
 
                 // Append the newly read data to our persistent buffer.
                 processing_buffer.extend_from_slice(&temp_read_buffer[..bytes_read]);
             }
             }.await;
             if let Err(e) = result {
-                eprintln!("Replication handler error: {}", e);
+                error!("Replication handler error: {}", e);
             }
         });
         return Ok(());
@@ -791,27 +792,27 @@ impl<W: AsyncWrite + Send + Unpin> MasterServer<W> {
                         for (_addr, writer) in replicas.iter_mut() {
                             let mut writer_guard = writer.lock().await;
                             if let Err(e) = writer_guard.write_all(&cmd).await {
-                                eprintln!("Failed to write to replica: {}", e);
+                                error!("Failed to write to replica: {}", e);
                                 // Optionally, handle the error by removing the replica
                                 continue;
                             }
                             // Flush the buffer to ensure the command is sent immediately
                             if let Err(e) = writer_guard.flush().await {
-                                eprintln!("Failed to flush to replica: {}", e);
+                                error!("Failed to flush to replica: {}", e);
                             }
-                            println!(
+                            info!(
                                 "Replication handler wrote {} bytes command successfully",
                                 cmd.len()
                             );
                         }
                     }
                     ReplicationMsg::AddReplica(addr, stream_writer) => {
-                        println!("Adding new replica: {}", addr);
+                        info!("Adding new replica: {}", addr);
                         replicas.insert(addr, stream_writer);
                         reported_offsets.insert(addr, 0);
                     }
                     ReplicationMsg::RemoveReplica(addr) => {
-                        println!("Removing new replica: {}", addr);
+                        info!("Removing new replica: {}", addr);
                         replicas.remove(&addr);
 
                         reported_offsets.remove(&addr);
@@ -879,55 +880,55 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
         use RedisCommand as RC;
         match command {
             RC::Ping => {
-                println!("Received PING command");
+                info!("Received PING command");
                 resp_bytes!("PONG")
             }
             RC::Echo(echo_string) => {
-                println!("Received ECHO command: {}", echo_string);
+                info!("Received ECHO command: {}", echo_string);
                 resp_bytes!(echo_string)
             }
             RC::Get(key) => {
-                println!("Received GET command for key: {}", key);
-                println!("Attempting to lock cache for GET");
+                info!("Received GET command for key: {}", key);
+                info!("Attempting to lock cache for GET");
                 let mut cache = self.cache.lock().await;
-                println!("Cache lock acquired for GET");
+                info!("Cache lock acquired for GET");
 
                 match cache.get(&key).cloned() {
                     Some(entry) if !entry.is_expired() => {
-                        println!("Key {} found and not expired", key);
+                        info!("Key {} found and not expired", key);
                         resp_bytes!(bulk entry.value)
                     }
                     Some(_) => {
-                        println!("Key {} expired, removing", key);
+                        info!("Key {} expired, removing", key);
                         cache.remove(&key); // Clean up expired key
                         resp_bytes!(null)
                     }
                     None => {
-                        println!("Key {} not found", key);
+                        info!("Key {} not found", key);
                         resp_bytes!(null)
                     }
                 }
             }
             RC::Set(command) => {
-                println!("Received SET command for key: {}", command.key);
-                println!("Attempting to lock cache for SET");
+                info!("Received SET command for key: {}", command.key);
+                info!("Attempting to lock cache for SET");
                 let mut cache = self.cache.lock().await;
-                println!("Cache lock acquired for SET");
+                info!("Cache lock acquired for SET");
 
                 // Check conditions (NX/XX)
                 let key_exists = cache.contains_key(&command.key);
-                println!("Key exists? {}", key_exists);
+                info!("Key exists? {}", key_exists);
 
                 if (matches!(command.condition, Some(SetCondition::NotExists)) && key_exists)
                     || (matches!(command.condition, Some(SetCondition::Exists)) && !key_exists)
                 {
-                    println!("SET condition not met for key {}", command.key);
+                    info!("SET condition not met for key {}", command.key);
                     return resp_bytes!(null);
                 }
 
                 let get_value = if command.get_old_value {
                     let old = cache.get(&command.key).map(|v| v.value.clone());
-                    println!("Returning old value for key {}: {:?}", command.key, old);
+                    info!("Returning old value for key {}: {:?}", command.key, old);
                     old
                 } else {
                     None
@@ -936,11 +937,11 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 // Calculate expiry
                 let expires_at = if let Some(ExpiryOption::KeepTtl) = command.expiry {
                     let ttl = cache.get(&command.key).and_then(|e| e.expires_at);
-                    println!("Keeping TTL for key {}: {:?}", command.key, ttl);
+                    info!("Keeping TTL for key {}: {:?}", command.key, ttl);
                     ttl
                 } else {
                     let ttl = command.calculate_expiry_time();
-                    println!("Calculated new TTL for key {}: {:?}", command.key, ttl);
+                    info!("Calculated new TTL for key {}: {:?}", command.key, ttl);
                     ttl
                 };
 
@@ -952,10 +953,10 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                         expires_at,
                     },
                 );
-                println!("Inserted/updated key {}", command.key);
+                info!("Inserted/updated key {}", command.key);
 
                 drop(cache);
-                println!("Released cache lock for SET");
+                info!("Released cache lock for SET");
 
                 // Broadcast message to replicas
                 let broadcast_cmd = resp_bytes!(array => [
@@ -965,22 +966,22 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 ]);
 
                 let broadcast_cmd_len = broadcast_cmd.len();
-                println!("Broadcasting SET command, len={}", broadcast_cmd_len);
+                info!("Broadcasting SET command, len={}", broadcast_cmd_len);
 
-                println!("Attempting to lock state for SET offset update");
+                info!("Attempting to lock state for SET offset update");
                 {
                     let mut state = self.state.lock().await;
-                    println!("State lock acquired for SET offset update");
+                    info!("State lock acquired for SET offset update");
                     state.current_offset += broadcast_cmd_len;
-                    println!("Updated current_offset: {}", state.current_offset);
+                    info!("Updated current_offset: {}", state.current_offset);
                 }
-                println!("Released state lock after SET");
+                info!("Released state lock after SET");
 
                 let _ = self
                     .replication_msg_sender
                     .send(ReplicationMsg::Broadcast(broadcast_cmd))
                     .await;
-                println!("Sent broadcast to replicas");
+                info!("Sent broadcast to replicas");
 
                 if !command.get_old_value {
                     resp_bytes!("OK")
@@ -992,7 +993,7 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 }
             }
             RC::ConfigGet(s) => {
-                println!("Received CONFIG GET for key: {}", s);
+                info!("Received CONFIG GET for key: {}", s);
                 match s.as_str() {
                     "dir" => resp_bytes!(array => [
                         resp!(bulk s),
@@ -1006,13 +1007,13 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 }
             }
             RC::Keys(query) => {
-                println!("Received KEYS command with pattern: {}", query);
+                info!("Received KEYS command with pattern: {}", query);
                 let query = query.replace('*', ".*");
-                println!("Translated query regex: {}", query);
+                info!("Translated query regex: {}", query);
 
-                println!("Attempting to lock cache for KEYS");
+                info!("Attempting to lock cache for KEYS");
                 let cache = self.cache.lock().await;
-                println!("Cache lock acquired for KEYS");
+                info!("Cache lock acquired for KEYS");
 
                 let regex = match Regex::new(&query) {
                     Ok(regex) => regex,
@@ -1023,103 +1024,103 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                     .filter(|key| regex.is_match(key))
                     .map(|key| Frame::BulkString(Bytes::copy_from_slice(key.as_bytes())))
                     .collect();
-                println!("Matched {} keys", matching_keys.len());
+                info!("Matched {} keys", matching_keys.len());
 
                 Frame::Array(matching_keys).to_resp_bytes()
             }
             RC::Info(_sub_command) => {
-                println!("Received INFO command");
-                println!("Attempting to lock state for INFO");
+                info!("Received INFO command");
+                info!("Attempting to lock state for INFO");
                 let state = self.state.lock().await;
-                println!("State lock acquired for INFO");
+                info!("State lock acquired for INFO");
 
                 let info_response = format!(
                     "# Replication\r\nrole:master\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
                     state.replid, state.current_offset,
                 );
-                println!("Generated INFO response");
+                info!("Generated INFO response");
 
                 resp_bytes!(bulk info_response)
             }
             RC::ReplConf(_) => {
-                println!("Received REPLCONF command");
+                info!("Received REPLCONF command");
                 // Master receives ACKs, but doesn't send a response to them.
                 // Other REPLCONF are part of handshake.
                 resp_bytes!("OK")
             }
             RC::Psync(_) => {
-                println!("Received PSYNC command (not handled here)");
+                info!("Received PSYNC command (not handled here)");
                 // PSYNC is handled specially in `handle_client`, this is a fallback.
                 resp_bytes!(error "ERR PSYNC logic error")
             }
             RC::Wait((no_replicas, time_in_ms)) => {
-                println!(
+                info!(
                     "Received WAIT command: replicas={}, timeout={}ms",
                     no_replicas, time_in_ms
                 );
 
                 let num_needed = match no_replicas.parse::<usize>() {
                     Ok(n) => {
-                        println!("Parsed replicas needed: {}", n);
+                        info!("Parsed replicas needed: {}", n);
                         n
                     }
                     Err(_) => {
-                        println!("Failed to parse replicas number");
+                        info!("Failed to parse replicas number");
                         return resp_bytes!(error "ERR invalid number of replicas");
                     }
                 };
 
                 let timeout = Duration::from_millis(match time_in_ms.parse::<u64>() {
                     Ok(t) => {
-                        println!("Parsed timeout: {}ms", t);
+                        info!("Parsed timeout: {}ms", t);
                         t
                     }
                     Err(_) => {
-                        println!("Failed to parse timeout");
+                        info!("Failed to parse timeout");
                         return resp_bytes!(error "ERR invalid timeout");
                     }
                 });
 
-                println!("Attempting to lock state for WAIT");
+                info!("Attempting to lock state for WAIT");
                 let required_offset = self.state.lock().await.current_offset;
-                println!(
+                info!(
                     "State lock acquired for WAIT. Required offset={}",
                     required_offset
                 );
 
                 // Function to ask the actor for the current count
                 let get_current_ack_count = || async {
-                    println!("Requesting current ack count...");
+                    info!("Requesting current ack count...");
                     let acks_guard = self.acks.lock().await;
                     let count = acks_guard
                         .values()
                         .inspect(|&&off| {
-                            println!("offset: {}, required_offset: {}", off, required_offset)
+                            info!("offset: {}, required_offset: {}", off, required_offset)
                         })
                         .filter(|&&off| off >= required_offset)
                         .count();
-                    println!("Ack count received: {}", count);
+                    info!("Ack count received: {}", count);
                     count
                 };
 
                 if required_offset == 0 {
-                    println!("Offset=0, returning replica count directly");
+                    info!("Offset=0, returning replica count directly");
                     let num_replicas = get_current_ack_count().await;
-                    println!("Number of replicas: {}", num_replicas);
+                    info!("Number of replicas: {}", num_replicas);
                     return resp_bytes!(int num_replicas as u64);
                 }
 
                 // Check if the condition is already met before waiting.
                 let initial_count = get_current_ack_count().await;
                 if initial_count >= num_needed {
-                    println!(
+                    info!(
                         "Condition already met ({} >= {})",
                         initial_count, num_needed
                     );
                     return resp_bytes!(int initial_count as u64);
                 }
 
-                println!("Broadcasting GETACK to replicas");
+                info!("Broadcasting GETACK to replicas");
                 let getack_cmd = resp_bytes!(array => [
                     resp!(bulk "REPLCONF"),
                     resp!(bulk "GETACK"),
@@ -1133,43 +1134,43 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 // This is our main waiting future.
                 let wait_fut = async {
                     loop {
-                        println!("WAIT: waiting for notification...");
+                        info!("WAIT: waiting for notification...");
                         self.ack_notifier.notified().await;
-                        println!("WAIT: notified!");
+                        info!("WAIT: notified!");
 
                         let current_count = get_current_ack_count().await;
-                        println!(
+                        info!(
                             "WAIT: current_count={}, needed={}",
                             current_count, num_needed
                         );
                         if current_count >= num_needed {
-                            println!("WAIT condition met!");
+                            info!("WAIT condition met!");
                             return current_count;
                         }
                     }
                 };
 
                 let final_count = if timeout.as_millis() == 0 {
-                    println!("WAIT timeout=0, returning immediately");
+                    info!("WAIT timeout=0, returning immediately");
                     get_current_ack_count().await
                 } else {
                     match tokio::time::timeout(timeout, wait_fut).await {
                         Ok(count) => {
-                            println!("WAIT completed successfully with count={}", count);
+                            info!("WAIT completed successfully with count={}", count);
                             count
                         }
                         Err(_) => {
-                            println!("WAIT timed out");
+                            info!("WAIT timed out");
                             get_current_ack_count().await
                         }
                     }
                 };
 
-                println!("WAIT returning final_count={}", final_count);
+                info!("WAIT returning final_count={}", final_count);
                 resp_bytes!(int final_count as u64)
             }
             RC::Invalid => {
-                println!("Received INVALID command");
+                info!("Received INVALID command");
                 resp_bytes!(error "ERR Invalid Command")
             }
         }
@@ -1378,7 +1379,7 @@ impl SlaveServer {
             }
         }
 
-        println!("Successfully synced {} databases from RDB to cache", rdb_file.databases.len());
+        info!("Successfully synced {} databases from RDB to cache", rdb_file.databases.len());
         Ok(())
     }
 }

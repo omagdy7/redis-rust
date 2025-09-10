@@ -31,6 +31,7 @@ use tokio::{
     io::{AsyncWrite, ReadHalf, WriteHalf},
     sync::Notify,
 };
+use tracing::{debug, error, info, warn};
 
 // responsible for periodically removing expired keys from database
 fn spawn_cleanup_task(cache: SharedMut<Cache>) {
@@ -44,7 +45,7 @@ fn spawn_cleanup_task(cache: SharedMut<Cache>) {
             let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
                 Ok(duration) => duration.as_millis() as u64,
                 Err(e) => {
-                    eprintln!("System time error: {}", e);
+                    error!("System time error: {}", e);
                     continue;
                 }
             };
@@ -83,31 +84,31 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
     acks_map: Option<SharedMut<HashMap<SocketAddr, usize>>>,
     ack_notifier: Option<Arc<Notify>>,
 ) -> Result<()> {
-    println!("Starting handle_client for {}", socket_addr);
+    info!("Starting handle_client for {}", socket_addr);
 
-    println!("Attempting to lock server to get role");
+    info!("Attempting to lock server to get role");
 
     let mut buffer = [0; 1024];
 
     loop {
-        println!("Waiting to read from client {}", socket_addr);
+        info!("Waiting to read from client {}", socket_addr);
         let n = match reader.read(&mut buffer).await {
             Ok(0) => {
-                println!("Client {} disconnected", socket_addr);
+                info!("Client {} disconnected", socket_addr);
                 return Ok(()); // connection closed
             }
             Ok(n) => {
-                println!("Read {} bytes from client {}", n, socket_addr);
+                info!("Read {} bytes from client {}", n, socket_addr);
                 n
             }
             Err(e) => {
-                println!("Error while reading from client {}: {}", socket_addr, e);
+                info!("Error while reading from client {}: {}", socket_addr, e);
                 return Err(e).context("error occurred while reading from stream");
             }
         };
 
         let (request, left_bytes) = parse(&buffer[..n]).context("failed to parse request")?;
-        println!(
+        info!(
             "Parsed request: {:?}, leftover bytes: {}",
             request,
             left_bytes.len()
@@ -117,16 +118,16 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
         assert!(left_bytes.is_empty());
 
         let command = RedisCommand::from(request.clone());
-        println!("Converted request to RedisCommand: {:?}", command);
+        info!("Converted request to RedisCommand: {:?}", command);
 
         // Special handling for PSYNC ---
         if let RedisCommand::Psync(_) = command {
-            println!("Handling PSYNC command for client {}", socket_addr);
+            info!("Handling PSYNC command for client {}", socket_addr);
 
             let (server_state, sender) = {
-                println!("Attempting to lock server for PSYNC state and sender");
+                info!("Attempting to lock server for PSYNC state and sender");
                 let server_instance = server.lock().await;
-                println!("Server lock acquired for PSYNC");
+                info!("Server lock acquired for PSYNC");
                 (
                     server_instance.get_server_state_owned(),
                     server_instance.get_replication_msg_sender().await,
@@ -134,21 +135,21 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
             };
 
             if let ServerState::MasterState(master) = server_state {
-                println!("Server is Master, fulfilling PSYNC handshake");
+                info!("Server is Master, fulfilling PSYNC handshake");
 
                 // Fulfill the master side of the handshake
-                println!("Attempting to lock master state for replid");
+                info!("Attempting to lock master state for replid");
 
                 let master_state_guard = master.lock().await;
                 let replid = master_state_guard.replid();
 
-                println!("Master state lock acquired, replid={}", replid);
+                info!("Master state lock acquired, replid={}", replid);
 
                 let response_str = format!("FULLRESYNC {} 0", replid);
                 let full_resync_response = resp_bytes!(response_str);
 
                 // Add this connection to the list of replicas
-                println!("Adding client {} as replica", socket_addr);
+                info!("Adding client {} as replica", socket_addr);
                 if let Some(sender) = sender {
                     sender
                         .send(ReplicationMsg::AddReplica(socket_addr, writer.clone()))
@@ -157,41 +158,41 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
                 } else {
                     return Err(anyhow::anyhow!("Replication sender not available in master mode"));
                 }
-                println!("Replica {} added successfully", socket_addr);
+                info!("Replica {} added successfully", socket_addr);
                 let server_guard = server.lock().await;
 
-                println!("adding acks of master's replica: {}", socket_addr);
+                info!("adding acks of master's replica: {}", socket_addr);
                 if let RedisServer::Master(master) = &*server_guard {
                     master.acks.lock().await.insert(socket_addr, 0);
                 }
 
                 // Lock the writer to send the multi-part response
-                println!("Attempting to lock writer for FULLRESYNC response");
+                info!("Attempting to lock writer for FULLRESYNC response");
                 let mut writer_guard = writer.lock().await;
-                println!("Writer lock acquired for FULLRESYNC response");
+                info!("Writer lock acquired for FULLRESYNC response");
                 writer_guard.write_all(&full_resync_response).await?;
-                println!("Sent FULLRESYNC response to {}", socket_addr);
+                info!("Sent FULLRESYNC response to {}", socket_addr);
 
                 if let Err(e) = send_empty_rdb(&mut *writer_guard).await {
-                    eprintln!("Failed to send empty RDB: {}", e);
+                    error!("Failed to send empty RDB: {}", e);
                 }
-                println!("Sent empty RDB to {}", socket_addr);
+                info!("Sent empty RDB to {}", socket_addr);
 
                 writer_guard.flush().await?;
-                println!("Flushed writer after FULLRESYNC to {}", socket_addr);
+                info!("Flushed writer after FULLRESYNC to {}", socket_addr);
             } else {
                 // A slave should not receive a PSYNC command from a client
-                println!("Server is Slave, rejecting PSYNC command");
+                info!("Server is Slave, rejecting PSYNC command");
                 let response = resp_bytes!(error "ERR PSYNC not supported on slave");
                 writer.lock().await.write_all(&response).await?;
-                println!("Sent PSYNC error response to {}", socket_addr);
+                info!("Sent PSYNC error response to {}", socket_addr);
             }
 
             // Skip the generic command handling below and wait for the next command
             continue;
         } else {
             // Generic command handling for all other commands ---
-            println!(
+            info!(
                 "Handling generic command {:?} from {}",
                 command, socket_addr
             );
@@ -199,19 +200,19 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
             // Special handling for REPLCONF ACK if master
             if role == "master" {
                 if let RedisCommand::ReplConf((ref op1, ref op2)) = command {
-                    println!("Received REPLCONF command: op1={}, op2={}", op1, op2);
+                    info!("Received REPLCONF command: op1={}, op2={}", op1, op2);
                     if op1.to_uppercase() == "ACK" {
-                        println!("Handling REPLCONF ACK from {}", socket_addr);
+                        info!("Handling REPLCONF ACK from {}", socket_addr);
                         if let Ok(offset) = op2.parse::<usize>() {
                             // ---- START REFACTORED CODE ----
                             // We use the passed-in acks_map and notifier, avoiding the main server lock.
                             if let (Some(acks), Some(notifier)) = (&acks_map, &ack_notifier) {
-                                println!("Attempting to acquire acks_guard mutex directly");
+                                info!("Attempting to acquire acks_guard mutex directly");
                                 let mut acks_guard = acks.lock().await;
-                                println!("Successfully acquired acks_guard mutex");
+                                info!("Successfully acquired acks_guard mutex");
 
                                 if let Some(o) = acks_guard.get_mut(&socket_addr) {
-                                    println!(
+                                    info!(
                                         "Updating ack of {:?} of offset {} to offset {}",
                                         socket_addr, o, offset
                                     );
@@ -221,16 +222,16 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
                                 drop(acks_guard);
                                 // Notify any waiting WAIT commands
                                 notifier.notify_waiters();
-                                println!("Notified waiters after ACK update.");
+                                info!("Notified waiters after ACK update.");
                             }
                             // ---- END REFACTORED CODE ----
                             else {
-                                println!(
+                                info!(
                                     "Error: Received ACK but acks_map/notifier not available."
                                 );
                             }
                         } else {
-                            println!("Failed to parse ACK offset from {}", op2);
+                            info!("Failed to parse ACK offset from {}", op2);
                         }
                         // No response needed for ACK
                         continue; // Continue to the next loop iteration
@@ -239,22 +240,22 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
             }
 
             let response = {
-                println!("Attempting to lock server for execute()");
+                info!("Attempting to lock server for execute()");
                 let server_instance = server.lock().await;
-                println!("Server lock acquired for execute()");
+                info!("Server lock acquired for execute()");
                 server_instance.execute(command).await
             };
 
-            println!("Command executed, response size: {}", response.len());
+            info!("Command executed, response size: {}", response.len());
 
             if !response.is_empty() {
-                println!("Attempting to lock writer to send response");
+                info!("Attempting to lock writer to send response");
                 let mut writer_guard = writer.lock().await;
-                println!("Writer lock acquired to send response");
+                info!("Writer lock acquired to send response");
                 writer_guard.write_all(&response).await?;
-                println!("Response sent to {}", socket_addr);
+                info!("Response sent to {}", socket_addr);
             } else {
-                println!("Empty response, nothing sent to {}", socket_addr);
+                info!("Empty response, nothing sent to {}", socket_addr);
             }
         }
     }
@@ -274,13 +275,13 @@ async fn load_rdb<W: AsyncWrite + Send + Unpin + 'static>(server: &RedisServer<W
                             RedisValue::String(data) => match String::from_utf8(data.to_vec()) {
                                 Ok(s) => s,
                                 Err(e) => {
-                                    eprintln!("Failed to decode string value: {}", e);
+                                    error!("Failed to decode string value: {}", e);
                                     continue;
                                 }
                             },
                             RedisValue::Integer(data) => data.to_string(),
                             _ => {
-                                eprintln!("Unsupported value type in RDB, skipping");
+                                error!("Unsupported value type in RDB, skipping");
                                 continue;
                             }
                         };
@@ -295,13 +296,13 @@ async fn load_rdb<W: AsyncWrite + Send + Unpin + 'static>(server: &RedisServer<W
                                 cache.insert(key_str, cache_entry);
                             }
                             Err(e) => {
-                                eprintln!("Failed to decode key: {}", e);
+                                error!("Failed to decode key: {}", e);
                                 continue;
                             }
                         }
                     }
                 } else {
-                    eprintln!("No database with index 0 found in RDB file");
+                    error!("No database with index 0 found in RDB file");
                 }
             }
         }
@@ -310,16 +311,17 @@ async fn load_rdb<W: AsyncWrite + Send + Unpin + 'static>(server: &RedisServer<W
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    tracing_subscriber::fmt::init();
     let server: RedisServer<WriteHalf<TcpStream>> = match RedisServer::new().await {
         Ok(Some(server)) => server,
         Ok(None) => RedisServer::new_master(), // Default to master if no args
         Err(e) => {
-            eprintln!("Error: {}", e);
+            error!("Error: {}", e);
             std::process::exit(1);
         }
     };
 
-    println!("Server created and its role is {}", server.role());
+    info!("Server created and its role is {}", server.role());
 
     load_rdb(&server).await;
     let port = server.port().to_string();
@@ -360,7 +362,7 @@ async fn main() -> std::io::Result<()> {
                 let socket_addr = match stream.peer_addr() {
                     Ok(addr) => addr,
                     Err(e) => {
-                        eprintln!("Failed to get peer address: {}", e);
+                        error!("Failed to get peer address: {}", e);
                         continue;
                     }
                 };
@@ -382,12 +384,12 @@ async fn main() -> std::io::Result<()> {
                     )
                     .await
                     {
-                        eprintln!("Error handling client: {}", e);
+                        error!("Error handling client: {}", e);
                     }
                 });
             }
             Err(e) => {
-                eprintln!("Connection failed: {}", e);
+                error!("Connection failed: {}", e);
             }
         }
     }
