@@ -201,11 +201,11 @@ mod command_execution_tests {
         let cache = new_cache();
         // Should succeed when key doesn't exist
         assert_eq!(run_command(&cache, &["SET", "k", "v1", "NX"]).await, b"+OK\r\n");
-        assert_eq!(get_from_cache(&cache, "k").await.unwrap().value, "v1");
+        assert_eq!(get_from_cache(&cache, "k").await.unwrap().value, Frame::BulkString("v1".into()));
 
         // Should fail when key exists
         assert_eq!(run_command(&cache, &["SET", "k", "v2", "NX"]).await, b"$-1\r\n");
-        assert_eq!(get_from_cache(&cache, "k").await.unwrap().value, "v1"); // Value is unchanged
+        assert_eq!(get_from_cache(&cache, "k").await.unwrap().value, Frame::BulkString("v1".into())); // Value is unchanged
     }
 
     #[tokio::test]
@@ -218,7 +218,7 @@ mod command_execution_tests {
         // Pre-populate and should succeed
         run_command(&cache, &["SET", "k", "v1"]).await;
         assert_eq!(run_command(&cache, &["SET", "k", "v2", "XX"]).await, b"+OK\r\n");
-        assert_eq!(get_from_cache(&cache, "k").await.unwrap().value, "v2");
+        assert_eq!(get_from_cache(&cache, "k").await.unwrap().value, Frame::BulkString("v2".into()));
     }
 
     #[tokio::test]
@@ -230,7 +230,7 @@ mod command_execution_tests {
         // a Simple String `+old\r\n`. The test correctly expects a Bulk String.
         let result = run_command(&cache, &["SET", "mykey", "new", "GET"]).await;
         assert_eq!(result, b"$3\r\nold\r\n");
-        assert_eq!(get_from_cache(&cache, "mykey").await.unwrap().value, "new");
+        assert_eq!(get_from_cache(&cache, "mykey").await.unwrap().value, Frame::BulkString("new".into()));
     }
 
     #[tokio::test]
@@ -266,7 +266,7 @@ mod command_execution_tests {
         run_command(&cache, &["SET", "mykey", "v2", "KEEPTTL"]).await;
 
         let entry2 = get_from_cache(&cache, "mykey").await.unwrap();
-        assert_eq!(entry2.value, "v2"); // Value is updated
+        assert_eq!(entry2.value, Frame::BulkString("v2".into())); // Value is updated
         assert_eq!(entry2.expires_at, expiry1); // TTL is retained
     }
 }

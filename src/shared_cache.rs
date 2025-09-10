@@ -3,9 +3,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::frame::Frame;
+
 #[derive(Debug, Clone)]
 pub struct CacheEntry {
-    pub value: String,
+    pub value: Frame,
     pub expires_at: Option<u64>, // Unix timestamp in milliseconds
 }
 

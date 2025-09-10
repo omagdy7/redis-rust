@@ -12,6 +12,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use codecrafters_redis::{frame::Frame, resp_parser::parse, server::SlaveServer};
 use codecrafters_redis::{
     rdb::{KeyExpiry, ParseError, RDBFile, RedisValue},
     resp_bytes,
@@ -19,11 +20,6 @@ use codecrafters_redis::{
     shared_cache::*,
 };
 use codecrafters_redis::{resp_commands::RedisCommand, server::RedisServer};
-use codecrafters_redis::{
-    frame::Frame,
-    resp_parser::parse,
-    server::SlaveServer,
-};
 use tokio::sync::Mutex;
 use tokio::{io::AsyncReadExt, net::TcpStream};
 use tokio::{io::AsyncWriteExt, spawn};
@@ -74,7 +70,6 @@ async fn send_empty_rdb<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-// TODO: This should return a Result to handle the plethora of different errors
 async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
     mut reader: ReadHalf<TcpStream>,
     writer: SharedMut<W>,
@@ -156,7 +151,9 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
                         .await
                         .context("Failed to add replica")?;
                 } else {
-                    return Err(anyhow::anyhow!("Replication sender not available in master mode"));
+                    return Err(anyhow::anyhow!(
+                        "Replication sender not available in master mode"
+                    ));
                 }
                 info!("Replica {} added successfully", socket_addr);
                 let server_guard = server.lock().await;
@@ -226,9 +223,7 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
                             }
                             // ---- END REFACTORED CODE ----
                             else {
-                                info!(
-                                    "Error: Received ACK but acks_map/notifier not available."
-                                );
+                                info!("Error: Received ACK but acks_map/notifier not available.");
                             }
                         } else {
                             info!("Failed to parse ACK offset from {}", op2);
@@ -272,18 +267,11 @@ async fn load_rdb<W: AsyncWrite + Send + Unpin + 'static>(server: &RedisServer<W
 
                     for (key, db_entry) in hash_table.iter() {
                         let value = match &db_entry.value {
-                            RedisValue::String(data) => match String::from_utf8(data.to_vec()) {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    error!("Failed to decode string value: {}", e);
-                                    continue;
-                                }
-                            },
-                            RedisValue::Integer(data) => data.to_string(),
-                            _ => {
-                                error!("Unsupported value type in RDB, skipping");
-                                continue;
-                            }
+                            RedisValue::String(data) => Frame::RedisString(data.clone()),
+                            RedisValue::Integer(data) => Frame::Integer(*data),
+                            RedisValue::List(items) => Frame::RedisList(items.clone()),
+                            RedisValue::Set(items) => Frame::RedisSet(items.clone()),
+                            RedisValue::Hash(map) => Frame::RedisHash(map.clone()),
                         };
                         let expires_at = if let Some(key_expiry) = &db_entry.expiry {
                             Some(key_expiry.timestamp)

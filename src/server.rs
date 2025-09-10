@@ -32,7 +32,6 @@ pub type SharedMut<T> = Arc<Mutex<T>>;
 pub type Shared<T> = Arc<T>;
 pub type BoxedAsyncWrite = Box<dyn AsyncWrite + Unpin + Send>;
 
-// TODO: add functions to access member variables instead of accessing them directly
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub dir: Option<String>,
@@ -157,7 +156,6 @@ impl<W: AsyncWrite + Send + Unpin + 'static> RedisServer<W> {
                         return Err("--replicaof requires a value".to_string());
                     }
 
-                    // TODO: Find a better name for this variable info
                     let info = args[i + 1].clone();
                     let (master_host, master_port) = info.split_once(' ').ok_or_else(|| {
                         "Invalid --replicaof format. Expected 'host port'".to_string()
@@ -900,7 +898,7 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 match cache.get(&key).cloned() {
                     Some(entry) if !entry.is_expired() => {
                         info!("Key {} found and not expired", key);
-                        resp_bytes!(bulk entry.value)
+                        entry.value.to_resp_bytes()
                     }
                     Some(_) => {
                         info!("Key {} expired, removing", key);
@@ -922,7 +920,16 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 match cache.get(&key).cloned() {
                     Some(entry) if !entry.is_expired() => {
                         info!("Key {} found and not expired", key);
-                        resp_bytes!("string")
+                        let type_str = match &entry.value {
+                            Frame::SimpleString(_) | Frame::BulkString(_) => "string",
+                            Frame::Integer(_) => "string", // Redis treats integers as strings
+                            Frame::Array(_) => "list",
+                            Frame::Set(_) => "set",
+                            Frame::Map(_) => "hash",
+                            Frame::Stream(_) => "stream",
+                            _ => "string", // Default to string for other types
+                        };
+                        resp_bytes!(type_str)
                     }
                     Some(_) => {
                         info!("Key {} expired, removing", key);
@@ -974,7 +981,7 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 cache.insert(
                     command.key.clone(),
                     CacheEntry {
-                        value: command.value.clone(),
+                        value: Frame::BulkString(command.value.clone().into()),
                         expires_at,
                     },
                 );
@@ -1012,10 +1019,33 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                     resp_bytes!("OK")
                 } else {
                     match get_value {
-                        Some(val) => resp_bytes!(bulk val),
+                        Some(val) => val.to_resp_bytes(),
                         None => resp_bytes!(null),
                     }
                 }
+            }
+            RC::Xadd { key, stream } => {
+                info!("Received XADD command for key: {}", key);
+                info!("Attempting to lock cache for SET");
+                let mut cache = self.cache.lock().await;
+                info!("Cache lock acquired for SET");
+
+                let stream_id = stream.id.to_string();
+
+                // Set the value
+                cache.insert(
+                    key.clone(),
+                    CacheEntry {
+                        value: Frame::Stream(vec![stream]),
+                        expires_at: None,
+                    },
+                );
+                info!("Inserted/key {}", key);
+
+                drop(cache);
+                info!("Released cache lock for XADD");
+
+                resp_bytes!(bulk stream_id)
             }
             RC::ConfigGet(s) => {
                 info!("Received CONFIG GET for key: {}", s);
@@ -1206,13 +1236,12 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
     async fn execute(&self, command: RedisCommand) -> Vec<u8> {
         use RedisCommand as RC;
         match command {
-            // Read-only commands are executed locally
             RC::Ping => resp_bytes!("PONG"),
             RC::Echo(echo_string) => resp_bytes!(echo_string),
             RC::Get(key) => {
                 let mut cache = self.cache.lock().await;
                 match cache.get(&key).cloned() {
-                    Some(entry) if !entry.is_expired() => resp_bytes!(bulk entry.value),
+                    Some(entry) if !entry.is_expired() => entry.value.to_resp_bytes(),
                     Some(_) => {
                         cache.remove(&key); // Clean up expired key
                         resp_bytes!(null)
@@ -1255,10 +1284,6 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                 );
                 resp_bytes!(bulk info_response)
             }
-
-            // Write commands are generally not allowed from clients on a slave.
-            // However, a slave *receives* SET commands from the master.
-            // This execute function handles both cases.
             RC::Set(command) => {
                 // For a slave, write commands are read-only by default. This could be configurable.
                 // If this SET command came from the master, it would be applied.
@@ -1268,15 +1293,14 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                 cache.insert(
                     command.key,
                     CacheEntry {
-                        value: command.value,
+                        value: Frame::BulkString(command.value.into()),
                         expires_at,
                     },
                 );
                 // Slaves do not propagate writes and typically respond with OK.
                 resp_bytes!("OK")
             }
-
-            // A slave must respond to REPLCONF GETACK * from the master
+            RC::Xadd { key, stream } => todo!(),
             RC::ReplConf((op1, op2)) => {
                 if op1.to_uppercase() == "GETACK" && op2 == "*" {
                     let state = self.state.lock().await;
@@ -1289,8 +1313,6 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                     resp_bytes!("OK") // For other REPLCONFs during handshake
                 }
             }
-
-            // Commands a slave should not execute or has a specific slave response
             RC::Psync(_) => resp_bytes!(error "ERR PSYNC not supported on slave"),
             RC::Wait(_) => resp_bytes!(error "ERR WAIT cannot be used with replica."),
             RC::Invalid => resp_bytes!(error "ERR Invalid Command"),
@@ -1371,17 +1393,13 @@ impl SlaveServer {
                     Err(_) => continue, // Skip keys that aren't valid UTF-8
                 };
 
-                // Convert RedisValue to String for cache storage
+                // Convert RedisValue to Frame for cache storage
                 let value = match &entry.value {
-                    RedisValue::String(bytes) => {
-                        match std::str::from_utf8(bytes) {
-                            Ok(s) => s.to_string(),
-                            Err(_) => continue, // Skip values that aren't valid UTF-8
-                        }
-                    }
-                    RedisValue::Integer(i) => i.to_string(),
-                    // For other types, we'll store a string representation
-                    _ => format!("{:?}", entry.value),
+                    RedisValue::String(bytes) => Frame::RedisString(bytes.clone()),
+                    RedisValue::Integer(i) => Frame::Integer(*i),
+                    RedisValue::List(items) => Frame::RedisList(items.clone()),
+                    RedisValue::Set(items) => Frame::RedisSet(items.clone()),
+                    RedisValue::Hash(map) => Frame::RedisHash(map.clone()),
                 };
 
                 // Convert expiry time to milliseconds

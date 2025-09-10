@@ -1,10 +1,64 @@
 use bytes::Bytes;
-use std::{
-    collections::{HashMap, HashSet},
-    fmt,
-};
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::str::FromStr;
 
 use crate::rdb;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StreamId {
+    pub ms_time: u64,
+    pub seq: u64,
+}
+
+impl fmt::Display for StreamId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.ms_time, self.seq)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ParseStreamIdError {
+    MissingPart,
+    InvalidNumber,
+}
+
+impl FromStr for StreamId {
+    type Err = ParseStreamIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut parts = s.splitn(2, '-');
+        let ms_time = parts
+            .next()
+            .ok_or(ParseStreamIdError::MissingPart)?
+            .parse::<u64>()
+            .map_err(|_| ParseStreamIdError::InvalidNumber)?;
+        let seq = parts
+            .next()
+            .ok_or(ParseStreamIdError::MissingPart)?
+            .parse::<u64>()
+            .map_err(|_| ParseStreamIdError::InvalidNumber)?;
+        Ok(StreamId { ms_time, seq })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamEntry {
+    pub id: StreamId,
+    pub fields: HashMap<String, String>,
+}
+
+impl StreamEntry {
+    pub fn new(id: StreamId, fields: HashMap<String, String>) -> Self {
+        Self { id, fields }
+    }
+
+    pub fn into_vec(self) -> Vec<HashMap<String, String>> {
+        let mut vec = Vec::new();
+        vec.push(self.fields);
+        vec
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Frame {
@@ -33,6 +87,8 @@ pub enum Frame {
     VerbatimString(Vec<Frame>),
     /// Map (%)
     Map(HashMap<String, Frame>),
+    /// Stream
+    Stream(Vec<StreamEntry>),
     /// Attribute (|)
     Attribute(Vec<Frame>),
     /// Set (~)
@@ -102,6 +158,39 @@ impl Frame {
                     );
                     result.extend(value.to_resp_bytes());
                 }
+                result
+            }
+            Frame::Stream(stream) => {
+                let len = stream.len();
+                let mut result = format!("*{}\r\n", len).into_bytes();
+
+                for entry in stream.iter() {
+                    let id = entry.id;
+                    // Each stream entry is an array of two elements: [ id, [ field, value, ... ] ]
+                    // Start the entry array with 2 elements
+                    result.extend(format!("*2\r\n").into_bytes());
+
+                    // 1) id as bulk string
+                    let id_s = id.to_string();
+                    let id_bytes = id_s.as_bytes();
+                    result.extend(format!("${}\r\n", id_bytes.len()).into_bytes());
+                    result.extend(id_bytes);
+                    result.extend(b"\r\n");
+
+                    // 2) fields as an array of alternating field/value bulk strings
+                    let fields_count = entry.fields.len();
+                    result.extend(format!("*{}\r\n", fields_count * 2).into_bytes());
+                    for (field, value) in entry.fields.iter() {
+                        result.extend(format!("${}\r\n", field.as_bytes().len()).into_bytes());
+                        result.extend(field.as_bytes());
+                        result.extend(b"\r\n");
+
+                        result.extend(format!("${}\r\n", value.as_bytes().len()).into_bytes());
+                        result.extend(value.as_bytes());
+                        result.extend(b"\r\n");
+                    }
+                }
+
                 result
             }
             Frame::Attribute(attrs) => {
@@ -233,6 +322,16 @@ impl fmt::Display for Frame {
                 }
                 write!(f, "]")
             }
+            Frame::Stream(stream) => {
+                write!(f, "Stream[")?;
+                for (i, entry) in stream.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{} => {:?}", entry.id, entry.fields)?;
+                }
+                write!(f, "]")
+            }
             Frame::Null => write!(f, "(null)"),
             Frame::Boolean(b) => write!(f, "{}", b),
             Frame::Double(d) => write!(f, "{}", d),
@@ -358,4 +457,3 @@ impl TryFrom<Frame> for rdb::RedisValue {
         }
     }
 }
-

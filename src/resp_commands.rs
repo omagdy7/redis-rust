@@ -1,5 +1,8 @@
-use crate::frame::Frame;
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::frame::{Frame, StreamEntry, StreamId};
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[derive(Debug, Clone)]
 pub enum SetCondition {
@@ -124,6 +127,7 @@ pub enum RedisCommand {
     ReplConf((String, String)),
     Psync((String, String)),
     Wait((String, String)),
+    Xadd { key: String, stream: StreamEntry },
     Invalid,
 }
 
@@ -274,6 +278,24 @@ impl From<Frame> for RedisCommand {
                         Ok(set_command) => Self::Set(set_command),
                         Err(_) => Self::Invalid,
                     }
+                }
+            }
+            "XADD" => {
+                let Some(key) = args.next() else {
+                    return Self::Invalid;
+                };
+                let Some(stream_id) = args.next() else {
+                    return Self::Invalid;
+                };
+
+                let id: StreamId = stream_id.parse().unwrap();
+                let mut fields: HashMap<String, String> = HashMap::new();
+                while let (Some(key), Some(value)) = (args.next(), args.next()) {
+                    fields.insert(key, value);
+                }
+                Self::Xadd {
+                    key: key,
+                    stream: StreamEntry::new(id, fields),
                 }
             }
             "TYPE" => match args.next() {
