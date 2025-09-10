@@ -117,6 +117,7 @@ pub enum RedisCommand {
     Echo(String),
     Get(String),
     Set(SetCommand),
+    Type(String),
     ConfigGet(String),
     Keys(String),
     Info(String),
@@ -275,6 +276,10 @@ impl From<Frame> for RedisCommand {
                     }
                 }
             }
+            "TYPE" => match args.next() {
+                Some(key) => Self::Type(key),
+                _ => Self::Invalid,
+            },
             "KEYS" => {
                 let Some(query) = args.next() else {
                     return Self::Invalid;

@@ -1,6 +1,6 @@
-use crate::rdb::{FromBytes, RDBFile, RedisValue, ExpiryUnit};
-use crate::resp_commands::{ExpiryOption, RedisCommand, SetCondition};
 use crate::frame::Frame;
+use crate::rdb::{ExpiryUnit, FromBytes, RDBFile, RedisValue};
+use crate::resp_commands::{ExpiryOption, RedisCommand, SetCondition};
 use crate::resp_parser::parse;
 use crate::shared_cache::{Cache, CacheEntry};
 use bytes::Bytes;
@@ -490,7 +490,9 @@ impl SlaveRole for SlaveServer {
                 {
                     self.state.lock().await.connection = Some(Arc::new(Mutex::new(stream)));
                 }
-                self.clone().start_replication_handler(rest.to_vec()).await?;
+                self.clone()
+                    .start_replication_handler(rest.to_vec())
+                    .await?;
 
                 Ok(())
             }
@@ -506,113 +508,115 @@ impl SlaveRole for SlaveServer {
         // Spawn the background listener thread
         tokio::spawn(async move {
             let result = async {
-            info!("Inside the tokio replication handler task");
+                info!("Inside the tokio replication handler task");
 
-            // This is our persistent buffer. It starts with the leftover data from the handshake.
-            let mut processing_buffer = initial_data;
-            let mut temp_read_buffer = [0u8; 1024]; // Temporary buffer for network reads
+                // This is our persistent buffer. It starts with the leftover data from the handshake.
+                let mut processing_buffer = initial_data;
+                let mut temp_read_buffer = [0u8; 1024]; // Temporary buffer for network reads
 
-            loop {
-                'processing: loop {
-                    if processing_buffer.is_empty() {
-                        break 'processing; // Nothing to do, break to read from network.
-                    }
-
-                    // Attempt 1: Try to parse an RDB file.
-                    // The RDB file is sent as a RESP Bulk String, so it will start with '$'.
-                    if let Ok((rdb_file, bytes_consumed)) = RDBFile::from_bytes(&processing_buffer)
-                    {
-                        info!("Parsed and consumed RDB file of size {}.", bytes_consumed);
-                        // Sync the rdb_file with the slave's cache
-                        if let Err(e) = server_clone.sync_rdb_to_cache(&rdb_file).await {
-                            error!("Failed to sync RDB to cache: {}", e);
+                loop {
+                    'processing: loop {
+                        if processing_buffer.is_empty() {
+                            break 'processing; // Nothing to do, break to read from network.
                         }
 
-                        processing_buffer.drain(..bytes_consumed);
+                        // Attempt 1: Try to parse an RDB file.
+                        // The RDB file is sent as a RESP Bulk String, so it will start with '$'.
+                        if let Ok((rdb_file, bytes_consumed)) =
+                            RDBFile::from_bytes(&processing_buffer)
+                        {
+                            info!("Parsed and consumed RDB file of size {}.", bytes_consumed);
+                            // Sync the rdb_file with the slave's cache
+                            if let Err(e) = server_clone.sync_rdb_to_cache(&rdb_file).await {
+                                error!("Failed to sync RDB to cache: {}", e);
+                            }
 
-                        // After consuming the RDB file, there might be more commands
-                        // already in the buffer, so we `continue` the processing loop.
-                        continue 'processing;
-                    }
+                            processing_buffer.drain(..bytes_consumed);
 
-                    if let Ok((resp, leftover)) = parse(&processing_buffer) {
-                        // A command was successfully parsed.
-                        let command_size = processing_buffer.len() - leftover.len();
-                        info!("Successfully parsed a command of size {}", command_size);
-                        info!("Command from master: {:?}", resp);
+                            // After consuming the RDB file, there might be more commands
+                            // already in the buffer, so we `continue` the processing loop.
+                            continue 'processing;
+                        }
 
-                        let command = RedisCommand::from(resp);
+                        if let Ok((resp, leftover)) = parse(&processing_buffer) {
+                            // A command was successfully parsed.
+                            let command_size = processing_buffer.len() - leftover.len();
+                            info!("Successfully parsed a command of size {}", command_size);
+                            info!("Command from master: {:?}", resp);
 
-                        // Some commands from master (like REPLCONF) require an acknowledgement.
-                        let needs_reply = matches!(command, RedisCommand::ReplConf(..));
+                            let command = RedisCommand::from(resp);
 
-                        let response = <SlaveServer as CommandHandler<TcpStream>>::execute(
-                            &server_clone,
-                            command,
-                        )
-                        .await;
+                            // Some commands from master (like REPLCONF) require an acknowledgement.
+                            let needs_reply = matches!(command, RedisCommand::ReplConf(..));
 
-                        if needs_reply && !response.is_empty() {
-                            info!("Slave responding to master: {}", bytes_to_ascii(&response));
-                            let master_connection = {
-                                let state_guard = state.lock().await;
-                                state_guard.connection.clone()
-                            };
+                            let response = <SlaveServer as CommandHandler<TcpStream>>::execute(
+                                &server_clone,
+                                command,
+                            )
+                            .await;
 
-                            if let Some(conn_arc) = master_connection {
-                                let mut stream_guard = conn_arc.lock().await;
-                                if let Err(e) = stream_guard.write_all(&response).await {
-                                    return Err(e.to_string());
+                            if needs_reply && !response.is_empty() {
+                                info!("Slave responding to master: {}", bytes_to_ascii(&response));
+                                let master_connection = {
+                                    let state_guard = state.lock().await;
+                                    state_guard.connection.clone()
+                                };
+
+                                if let Some(conn_arc) = master_connection {
+                                    let mut stream_guard = conn_arc.lock().await;
+                                    if let Err(e) = stream_guard.write_all(&response).await {
+                                        return Err(e.to_string());
+                                    }
                                 }
                             }
+
+                            // Update the slave's tracked offset
+                            {
+                                let mut state_guard = state.lock().await;
+                                state_guard.master_repl_offset += command_size;
+                                info!("Slave offset is now: {}", state_guard.master_repl_offset);
+                            }
+
+                            // Remove the processed command from the front of the buffer.
+                            processing_buffer.drain(..command_size);
+                            continue 'processing;
                         }
 
-                        // Update the slave's tracked offset
-                        {
-                            let mut state_guard = state.lock().await;
-                            state_guard.master_repl_offset += command_size;
-                            info!("Slave offset is now: {}", state_guard.master_repl_offset);
-                        }
-
-                        // Remove the processed command from the front of the buffer.
-                        processing_buffer.drain(..command_size);
-                        continue 'processing;
+                        // If we reach here, neither parser could complete.
+                        // We have incomplete data. Break the inner loop to read more.
+                        info!("Incomplete data in buffer, waiting for more from master.");
+                        break 'processing;
                     }
 
-                    // If we reach here, neither parser could complete.
-                    // We have incomplete data. Break the inner loop to read more.
-                    info!("Incomplete data in buffer, waiting for more from master.");
-                    break 'processing;
+                    // Now, we read more data from the master. This only happens when the
+                    // processing_buffer is either empty or contains an incomplete command.
+                    let master_connection = {
+                        let state_guard = state.lock().await;
+                        state_guard.connection.clone()
+                    };
+
+                    let bytes_read = if let Some(stream_arc) = master_connection {
+                        let mut stream_guard = stream_arc.lock().await;
+                        match stream_guard.read(&mut temp_read_buffer).await {
+                            Ok(0) => {
+                                return Ok(());
+                            }
+                            Ok(n) => n,
+                            Err(e) => {
+                                return Err(e.to_string());
+                            }
+                        }
+                    } else {
+                        return Err("No connection to master found.".to_string());
+                    };
+
+                    info!("Read {} new bytes from master.", bytes_read);
+
+                    // Append the newly read data to our persistent buffer.
+                    processing_buffer.extend_from_slice(&temp_read_buffer[..bytes_read]);
                 }
-
-                // Now, we read more data from the master. This only happens when the
-                // processing_buffer is either empty or contains an incomplete command.
-                let master_connection = {
-                    let state_guard = state.lock().await;
-                    state_guard.connection.clone()
-                };
-
-                let bytes_read = if let Some(stream_arc) = master_connection {
-                    let mut stream_guard = stream_arc.lock().await;
-                    match stream_guard.read(&mut temp_read_buffer).await {
-                        Ok(0) => {
-                            return Ok(());
-                        }
-                        Ok(n) => n,
-                        Err(e) => {
-                            return Err(e.to_string());
-                        }
-                    }
-                } else {
-                    return Err("No connection to master found.".to_string());
-                };
-
-                info!("Read {} new bytes from master.", bytes_read);
-
-                // Append the newly read data to our persistent buffer.
-                processing_buffer.extend_from_slice(&temp_read_buffer[..bytes_read]);
             }
-            }.await;
+            .await;
             if let Err(e) = result {
                 error!("Replication handler error: {}", e);
             }
@@ -909,6 +913,27 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                     }
                 }
             }
+            RC::Type(key) => {
+                info!("Received TYPE command for key: {}", key);
+                info!("Attempting to lock cache for GET");
+                let cache = self.cache.lock().await;
+                info!("Cache lock acquired for GET");
+
+                match cache.get(&key).cloned() {
+                    Some(entry) if !entry.is_expired() => {
+                        info!("Key {} found and not expired", key);
+                        resp_bytes!("string")
+                    }
+                    Some(_) => {
+                        info!("Key {} expired, removing", key);
+                        resp_bytes!(null)
+                    }
+                    None => {
+                        info!("Key {} not found", key);
+                        resp_bytes!("none")
+                    }
+                }
+            }
             RC::Set(command) => {
                 info!("Received SET command for key: {}", command.key);
                 info!("Attempting to lock cache for SET");
@@ -1195,6 +1220,9 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                     None => resp_bytes!(null),
                 }
             }
+            RC::Type(key) => {
+                todo!()
+            }
             RC::ConfigGet(s) => match s.as_str() {
                 "dir" => {
                     resp_bytes!(array => [resp!(bulk s), resp!(bulk self.config.dir.as_deref().unwrap_or(""))])
@@ -1369,17 +1397,14 @@ impl SlaveServer {
                 };
 
                 // Insert into cache
-                cache.insert(
-                    key,
-                    CacheEntry {
-                        value,
-                        expires_at,
-                    },
-                );
+                cache.insert(key, CacheEntry { value, expires_at });
             }
         }
 
-        info!("Successfully synced {} databases from RDB to cache", rdb_file.databases.len());
+        info!(
+            "Successfully synced {} databases from RDB to cache",
+            rdb_file.databases.len()
+        );
         Ok(())
     }
 }
