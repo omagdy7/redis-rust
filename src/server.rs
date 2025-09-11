@@ -108,7 +108,7 @@ pub enum RedisServer<W: AsyncWrite + Send + Unpin + 'static> {
 }
 
 pub trait CommandHandler<W: AsyncWrite + Send + Unpin + 'static> {
-    async fn execute(&self, command: RedisCommand) -> Vec<u8>;
+    fn execute(&self, command: RedisCommand) -> impl Future<Output = Vec<u8>>;
 }
 
 trait SlaveRole {
@@ -1173,19 +1173,25 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 info!("Received XRead command for keys: {:?}", keys);
 
                 if let Some(timeout_ms) = block_param {
-                    info!("Blocking XREAD with timeout: {}ms", timeout_ms);
+                    if timeout_ms == 0 {
+                        info!("Blocking XREAD indefinitely until we recieve a notification");
+                        self.xadd_notifier.notified().await;
+                        info!("XREAD unblocked by notification")
+                    } else {
+                        info!("Blocking XREAD with timeout: {}ms", timeout_ms);
+                        // Wait for notification or timeout
+                        let timeout_duration = Duration::from_millis(timeout_ms);
+                        let timeout_result =
+                            tokio::time::timeout(timeout_duration, self.xadd_notifier.notified())
+                                .await;
 
-                    // Wait for notification or timeout
-                    let timeout_duration = Duration::from_millis(timeout_ms);
-                    let timeout_result =
-                        tokio::time::timeout(timeout_duration, self.xadd_notifier.notified()).await;
-
-                    match timeout_result {
-                        Ok(_) => info!("XREAD unblocked by notification"),
-                        Err(_) => {
-                            info!("XREAD timed out after {}ms", timeout_ms);
-                            // Return null on timeout with no new entries
-                            return resp_bytes!(null_array);
+                        match timeout_result {
+                            Ok(_) => info!("XREAD unblocked by notification"),
+                            Err(_) => {
+                                info!("XREAD timed out after {}ms", timeout_ms);
+                                // Return null on timeout with no new entries
+                                return resp_bytes!(null_array);
+                            }
                         }
                     }
                 }
