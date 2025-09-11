@@ -1206,7 +1206,54 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                     }
                 }
 
-                drop(cache);
+                resp_bytes!(error "ERR")
+            }
+
+            RC::XRead { key, stream_id } => {
+                info!("Received XRead command for key: {}", key);
+                info!("Attempting to lock cache for XREAD");
+                let cache = self.cache.lock().await;
+                info!("Cache lock acquired for XREAD");
+
+                if let Some(entry) = cache.get(&key) {
+                    if let Frame::Stream(ref vec) = entry.value {
+                        info!(
+                            "In XREAD execution and for key {} and the Stream is : {:?}",
+                            key, vec
+                        );
+
+                        let filtered_streams = vec
+                            .iter()
+                            .filter(|stream| stream.id > stream_id)
+                            .collect::<Vec<&StreamEntry>>();
+
+                        let mut entries = Vec::new();
+                        for stream in filtered_streams {
+                            let id_str = stream.id.to_string();
+
+                            // Build fields: ["temperature", "65"]
+                            let fields = stream
+                                .fields
+                                .iter()
+                                .flat_map(|(k, v)| {
+                                    vec![resp!(bulk k.clone()), resp!(bulk v.clone())]
+                                })
+                                .collect::<Vec<Frame>>();
+
+                            // Each entry: ["0-1", ["temperature", "65"]]
+                            let entry =
+                                resp!(array => [resp!(bulk id_str), resp!(array => fields)]);
+                            entries.push(entry);
+                        }
+
+                        // Wrap into: ["grape", [entries...]]
+                        let stream_resp =
+                            resp!(array => [resp!(bulk key), resp!(array => entries)]);
+
+                        // Final response is an array of streams
+                        return resp_bytes!(array => [stream_resp]);
+                    }
+                }
 
                 resp_bytes!(error "ERR")
             }
@@ -1473,6 +1520,9 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
 
             RC::XRange { key, start, end } => {
                 todo!("Implement XRange for slaves")
+            }
+            RC::XRead { key, stream_id } => {
+                todo!("Implement XRead for slaves")
             }
             RC::ReplConf((op1, op2)) => {
                 if op1.to_uppercase() == "GETACK" && op2 == "*" {

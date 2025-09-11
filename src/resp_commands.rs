@@ -137,6 +137,10 @@ pub enum RedisCommand {
         start: XrangeStreamdId,
         end: XrangeStreamdId,
     },
+    XRead {
+        key: String,
+        stream_id: StreamId,
+    },
     Invalid,
 }
 
@@ -327,6 +331,23 @@ impl From<Frame> for RedisCommand {
                     start: start_id,
                     end: end_id,
                 }
+            }
+            "XREAD" => {
+                // to consume the 'streams' literal
+                let Some(_) = args.next() else {
+                    return Self::Invalid;
+                };
+
+                let Some(key) = args.next() else {
+                    return Self::Invalid;
+                };
+                let Some(stream_id) = args.next() else {
+                    return Self::Invalid;
+                };
+
+                let stream_id: StreamId = stream_id.parse().unwrap();
+
+                Self::XRead { key, stream_id }
             }
             "TYPE" => match args.next() {
                 Some(key) => Self::Type(key),
