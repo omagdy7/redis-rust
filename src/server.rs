@@ -1209,53 +1209,59 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 resp_bytes!(error "ERR")
             }
 
-            RC::XRead { key, stream_id } => {
-                info!("Received XRead command for key: {}", key);
+            RC::XRead { keys, stream_ids } => {
+                info!("Received XRead command for keys: {:?}", keys);
                 info!("Attempting to lock cache for XREAD");
                 let cache = self.cache.lock().await;
                 info!("Cache lock acquired for XREAD");
 
-                if let Some(entry) = cache.get(&key) {
-                    if let Frame::Stream(ref vec) = entry.value {
-                        info!(
-                            "In XREAD execution and for key {} and the Stream is : {:?}",
-                            key, vec
-                        );
+                let mut stream_responses = Vec::new();
 
-                        let filtered_streams = vec
-                            .iter()
-                            .filter(|stream| stream.id > stream_id)
-                            .collect::<Vec<&StreamEntry>>();
-
-                        let mut entries = Vec::new();
-                        for stream in filtered_streams {
-                            let id_str = stream.id.to_string();
-
-                            // Build fields: ["temperature", "65"]
-                            let fields = stream
-                                .fields
+                // Iterate through each key-stream_id pair
+                for (key, stream_id) in keys.iter().zip(stream_ids.iter()) {
+                    if let Some(entry) = cache.get(key) {
+                        if let Frame::Stream(ref vec) = entry.value {
+                            info!(
+                                "In XREAD execution and for key {} and the Stream is : {:?}",
+                                key, vec
+                            );
+                            let filtered_streams = vec
                                 .iter()
-                                .flat_map(|(k, v)| {
-                                    vec![resp!(bulk k.clone()), resp!(bulk v.clone())]
-                                })
-                                .collect::<Vec<Frame>>();
+                                .filter(|stream| stream.id > *stream_id)
+                                .collect::<Vec<&StreamEntry>>();
 
-                            // Each entry: ["0-1", ["temperature", "65"]]
-                            let entry =
-                                resp!(array => [resp!(bulk id_str), resp!(array => fields)]);
-                            entries.push(entry);
+                            // Only include this stream in response if it has entries
+                            if !filtered_streams.is_empty() {
+                                let mut entries = Vec::new();
+                                for stream in filtered_streams {
+                                    let id_str = stream.id.to_string();
+                                    // Build fields: ["temperature", "65"]
+                                    let fields = stream
+                                        .fields
+                                        .iter()
+                                        .flat_map(|(k, v)| {
+                                            vec![resp!(bulk k.clone()), resp!(bulk v.clone())]
+                                        })
+                                        .collect::<Vec<Frame>>();
+                                    // Each entry: ["0-1", ["temperature", "65"]]
+                                    let entry = resp!(array => [resp!(bulk id_str), resp!(array => fields)]);
+                                    entries.push(entry);
+                                }
+                                // Wrap into: ["grape", [entries...]]
+                                let stream_resp = resp!(array => [resp!(bulk key.clone()), resp!(array => entries)]);
+                                stream_responses.push(stream_resp);
+                            }
                         }
-
-                        // Wrap into: ["grape", [entries...]]
-                        let stream_resp =
-                            resp!(array => [resp!(bulk key), resp!(array => entries)]);
-
-                        // Final response is an array of streams
-                        return resp_bytes!(array => [stream_resp]);
                     }
                 }
 
-                resp_bytes!(error "ERR")
+                // If no streams have new entries, return null
+                if stream_responses.is_empty() {
+                    return resp_bytes!(null);
+                }
+
+                // Final response is an array of streams
+                resp_bytes!(array => stream_responses)
             }
             RC::ConfigGet(s) => {
                 info!("Received CONFIG GET for key: {}", s);
@@ -1521,7 +1527,7 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
             RC::XRange { key, start, end } => {
                 todo!("Implement XRange for slaves")
             }
-            RC::XRead { key, stream_id } => {
+            RC::XRead { keys, stream_ids } => {
                 todo!("Implement XRead for slaves")
             }
             RC::ReplConf((op1, op2)) => {

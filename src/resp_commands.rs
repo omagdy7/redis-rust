@@ -138,8 +138,8 @@ pub enum RedisCommand {
         end: XrangeStreamdId,
     },
     XRead {
-        key: String,
-        stream_id: StreamId,
+        keys: Vec<String>,
+        stream_ids: Vec<StreamId>,
     },
     Invalid,
 }
@@ -338,16 +338,19 @@ impl From<Frame> for RedisCommand {
                     return Self::Invalid;
                 };
 
-                let Some(key) = args.next() else {
-                    return Self::Invalid;
-                };
-                let Some(stream_id) = args.next() else {
-                    return Self::Invalid;
-                };
+                let mut args: Vec<String> = args.collect();
 
-                let stream_id: StreamId = stream_id.parse().unwrap();
+                let i = args.partition_point(|element| element.parse::<StreamId>().is_err());
+                let stream_ids: Vec<StreamId> = args
+                    .split_off(i)
+                    .iter()
+                    .map(|s_id| s_id.parse().unwrap())
+                    .collect();
 
-                Self::XRead { key, stream_id }
+                Self::XRead {
+                    keys: args,
+                    stream_ids,
+                }
             }
             "TYPE" => match args.next() {
                 Some(key) => Self::Type(key),
