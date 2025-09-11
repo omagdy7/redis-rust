@@ -42,7 +42,7 @@ fn test_valid_integers() {
 fn test_invalid_integers() {
     // Wrong data type marker
     assert_eq!(
-        parse_integers(b"+42\r\n").err().unwrap().message(),
+        parse_integers(b"+42\r\n").err().unwrap().to_string(),
         "ERR Invalid data type"
     );
 
@@ -51,61 +51,61 @@ fn test_invalid_integers() {
 
     // Non-numeric content
     assert_eq!(
-        parse_integers(b":abc\r\n").err().unwrap().message(),
+        parse_integers(b":abc\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Mixed numeric and non-numeric
     assert_eq!(
-        parse_integers(b":42abc\r\n").err().unwrap().message(),
+        parse_integers(b":42abc\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Empty integer
     assert_eq!(
-        parse_integers(b":\r\n").err().unwrap().message(),
+        parse_integers(b":\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Contains \r in content
     assert_eq!(
-        parse_integers(b":42\r23\r\n").err().unwrap().message(),
+        parse_integers(b":42\r23\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Contains \n in content
     assert_eq!(
-        parse_integers(b":42\n23\r\n").err().unwrap().message(),
+        parse_integers(b":42\n23\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Missing \r\n terminator
     assert_eq!(
-        parse_integers(b":42").err().unwrap().message(),
+        parse_integers(b":42").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
     // Only \r without \n
     assert_eq!(
-        parse_integers(b":42\r").err().unwrap().message(),
+        parse_integers(b":42\r").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
     // Only \n without \r
     assert_eq!(
-        parse_integers(b":42\n").err().unwrap().message(),
+        parse_integers(b":42\n").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
     // Empty input
     assert_eq!(
-        parse_integers(b"").err().unwrap().message(),
+        parse_integers(b"").err().unwrap().to_string(),
         "ERR Empty data"
     );
 
     // Just the marker without content
     assert_eq!(
-        parse_integers(b":").err().unwrap().message(),
+        parse_integers(b":").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
@@ -114,36 +114,36 @@ fn test_invalid_integers() {
         parse_integers(b":18446744073709551616\r\n") // u64::MAX + 1
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR invalid value"
     );
 
     // Floating point numbers
     assert_eq!(
-        parse_integers(b":42.5\r\n").err().unwrap().message(),
+        parse_integers(b":42.5\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Scientific notation
     assert_eq!(
-        parse_integers(b":1e5\r\n").err().unwrap().message(),
+        parse_integers(b":1e5\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Hexadecimal numbers
     assert_eq!(
-        parse_integers(b":0x42\r\n").err().unwrap().message(),
+        parse_integers(b":0x42\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Whitespace
     assert_eq!(
-        parse_integers(b": 42\r\n").err().unwrap().message(),
+        parse_integers(b": 42\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     assert_eq!(
-        parse_integers(b":42 \r\n").err().unwrap().message(),
+        parse_integers(b":42 \r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 }

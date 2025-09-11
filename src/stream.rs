@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
+use crate::error::ParseStreamIdError;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StreamId {
     pub ms_time: u64,
@@ -29,12 +31,7 @@ impl fmt::Display for StreamId {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum ParseStreamIdError {
-    MissingPart,
-    InvalidNumber,
-    InvalidAuto,
-}
+
 
 #[derive(Debug, Clone)]
 pub enum XaddStreamId {

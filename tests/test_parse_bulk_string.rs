@@ -76,37 +76,37 @@ fn test_null_bulk_string() {
 fn test_invalid_bulk_strings() {
     // Wrong data type marker
     assert_eq!(
-        parse_bulk_strings(b"+OK\r\n").err().unwrap().message(),
+        parse_bulk_strings(b"+OK\r\n").err().unwrap().to_string(),
         "ERR Invalid data type"
     );
 
     // Invalid length format
     assert_eq!(
-        parse_bulk_strings(b"$abc\r\n").err().unwrap().message(),
+        parse_bulk_strings(b"$abc\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Negative length (other than -1)
     assert_eq!(
-        parse_bulk_strings(b"$-5\r\n").err().unwrap().message(),
+        parse_bulk_strings(b"$-5\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Missing length
     assert_eq!(
-        parse_bulk_strings(b"$\r\n").err().unwrap().message(),
+        parse_bulk_strings(b"$\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Missing first \r\n after length
     assert_eq!(
-        parse_bulk_strings(b"$5hello\r\n").err().unwrap().message(),
+        parse_bulk_strings(b"$5hello\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Content shorter than declared length
     assert_eq!(
-        parse_bulk_strings(b"$5\r\nhi\r\n").err().unwrap().message(),
+        parse_bulk_strings(b"$5\r\nhi\r\n").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
@@ -115,13 +115,13 @@ fn test_invalid_bulk_strings() {
         parse_bulk_strings(b"$2\r\nhello\r\n")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR Unexpected end of input"
     );
 
     // Missing final \r\n
     assert_eq!(
-        parse_bulk_strings(b"$5\r\nhello").err().unwrap().message(),
+        parse_bulk_strings(b"$5\r\nhello").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
@@ -130,7 +130,7 @@ fn test_invalid_bulk_strings() {
         parse_bulk_strings(b"$5\r\nhello\r")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR Unexpected end of input"
     );
 
@@ -139,19 +139,19 @@ fn test_invalid_bulk_strings() {
         parse_bulk_strings(b"$5\r\nhello\n")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR Unexpected end of input"
     );
 
     // Empty input
     assert_eq!(
-        parse_bulk_strings(b"").err().unwrap().message(),
+        parse_bulk_strings(b"").err().unwrap().to_string(),
         "ERR Empty data"
     );
 
     // Just the marker
     assert_eq!(
-        parse_bulk_strings(b"$").err().unwrap().message(),
+        parse_bulk_strings(b"$").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
@@ -160,7 +160,7 @@ fn test_invalid_bulk_strings() {
         parse_bulk_strings(b"$100\r\nshort\r\n")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR Unexpected end of input"
     );
 
@@ -169,7 +169,7 @@ fn test_invalid_bulk_strings() {
         parse_bulk_strings(b"$0\r\nhello\r\n")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR Unexpected end of input"
     );
 }

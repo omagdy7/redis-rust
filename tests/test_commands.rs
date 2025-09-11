@@ -156,7 +156,7 @@ mod command_execution_tests {
         let mut server = RedisServer::new_master();
         server.set_cache(cache);
 
-        server.execute(command).await
+        server.execute(command).await.unwrap()
     }
 
     #[tokio::test]
@@ -170,7 +170,7 @@ mod command_execution_tests {
     async fn test_execute_echo() {
         let cache = new_cache();
         // Note: the provided code has a bug, it returns a Simple String, not a Bulk String.
-        // A correct implementation would return `resp!(bulk "hello")`.
+        // A correct implementation would return `frame!(bulk "hello")`.
         let result = run_command(&cache, &["ECHO", "hello"]).await;
         assert_eq!(result, b"+hello\r\n");
     }

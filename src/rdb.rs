@@ -10,9 +10,9 @@ use std::{
 };
 
 use bytes::Bytes;
-use thiserror::Error;
 
 use crate::commands::ExpiryOption;
+use crate::error::{ParseError, RdbError};
 
 /// Represents any possible value that a key can hold in Redis.
 ///
@@ -117,42 +117,7 @@ fn encode_length(len: usize) -> Result<Vec<u8>, RdbError> {
     }
 }
 
-/// Custom error type for RDB parsing operations
-#[derive(Debug, thiserror::Error)]
-pub enum RdbError {
-    #[error("Invalid magic number in RDB file")]
-    InvalidMagicNumber,
 
-    #[error("Invalid version in RDB file: {version}")]
-    InvalidVersion { version: String },
-
-    #[error("Unexpected end of file while parsing RDB")]
-    UnexpectedEof,
-
-    #[error("Invalid metadata in RDB file")]
-    InvalidMetadata,
-
-    #[error("Invalid length encoding: {length}")]
-    InvalidLength { length: usize },
-
-    #[error("Array conversion failed: {message}")]
-    ArrayConversionError { message: String },
-
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("UTF-8 conversion error: {0}")]
-    Utf8(#[from] std::str::Utf8Error),
-
-    #[error("Integer conversion error: {0}")]
-    TryFromInt(#[from] std::num::TryFromIntError),
-
-    #[error("Value type conversion failed: {value}")]
-    ValueTypeConversion { value: u8 },
-}
-
-// Alias for backward compatibility
-pub type ParseError = RdbError;
 
 // Custom parsing trait that returns bytes consumed
 pub trait FromBytes: Sized {

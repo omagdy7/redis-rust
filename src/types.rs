@@ -1,9 +1,11 @@
-use crate::commands::RedisCommand;
-use crate::stream::{StreamId, XaddStreamId};
 use std::{future::Future, net::SocketAddr, sync::Arc};
 use tokio::io::AsyncWrite;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+
+use crate::commands::RedisCommand;
+use crate::error::RespError;
+use crate::stream::{StreamId, XaddStreamId};
 
 pub type SharedMut<T> = Arc<Mutex<T>>;
 pub type Shared<T> = Arc<T>;
@@ -163,7 +165,7 @@ impl SlaveState {
 }
 
 pub trait CommandHandler<W: AsyncWrite + Send + Unpin + 'static> {
-    fn execute(&self, command: RedisCommand) -> impl Future<Output = Vec<u8>>;
+    fn execute(&self, command: RedisCommand) -> impl Future<Output = Result<Vec<u8>, RespError>>;
 }
 
 pub trait ServerStateTrait {

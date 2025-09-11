@@ -53,7 +53,7 @@ fn test_invalid_arrays() {
         parse_array(b"+2\r\n$5\r\nhello\r\n")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR Invalid data type"
     );
 
@@ -62,19 +62,19 @@ fn test_invalid_arrays() {
         parse_array(b"*2\r\n$5\r\nhello\r\n$5\r\nworld")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR Unexpected end of input"
     );
 
     // Invalid length
     assert_eq!(
-        parse_array(b"*-1\r\n").err().unwrap().message(),
+        parse_array(b"*-1\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Non-numeric length
     assert_eq!(
-        parse_array(b"*abc\r\n").err().unwrap().message(),
+        parse_array(b"*abc\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
@@ -83,22 +83,22 @@ fn test_invalid_arrays() {
         parse_array(b"*2\r\n$5\r\nhello\r\n")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR Unexpected end of input"
     );
 
     // Empty input
-    assert_eq!(parse_array(b"").err().unwrap().message(), "ERR Empty data");
+    assert_eq!(parse_array(b"").err().unwrap().to_string(), "ERR Empty data");
 
     // Just the marker
     assert_eq!(
-        parse_array(b"*").err().unwrap().message(),
+        parse_array(b"*").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
     // Invalid element type
     assert_eq!(
-        parse_array(b"*1\r\n@invalid\r\n").err().unwrap().message(),
+        parse_array(b"*1\r\n@invalid\r\n").err().unwrap().to_string(),
         "ERR Invalid data type"
     );
 }

@@ -1,9 +1,11 @@
-use crate::master::MasterServer;
+use std::{env, sync::Arc};
+
 use crate::commands::RedisCommand;
+use crate::error::RespError;
+use crate::master::MasterServer;
 use crate::shared_cache::Cache;
 use crate::slave::{SlaveRole, SlaveServer};
 use crate::types::*;
-use std::{env, sync::Arc};
 
 #[derive(Debug, Clone)]
 pub enum RedisServer {
@@ -87,7 +89,7 @@ impl RedisServer {
         Ok(Some(redis_server))
     }
 
-    pub async fn execute(&self, command: RedisCommand) -> Vec<u8> {
+    pub async fn execute(&self, command: RedisCommand) -> Result<Vec<u8>, RespError> {
         match self {
             RedisServer::Master(master) => {
                 <MasterServer as CommandHandler<BoxedAsyncWrite>>::execute(master, command).await

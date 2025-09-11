@@ -56,18 +56,18 @@ fn test_full_resync_string() {
 
     // Wrong prefix
     assert_eq!(
-        parse_simple_strings(b"-Error\r\n").err().unwrap().message(),
+        parse_simple_strings(b"-Error\r\n").err().unwrap().to_string(),
         "WRONGTYPE Operation against a key holding the wrong kind of value"
     );
     assert_eq!(
-        parse_simple_strings(b":123\r\n").err().unwrap().message(),
+        parse_simple_strings(b":123\r\n").err().unwrap().to_string(),
         "WRONGTYPE Operation against a key holding the wrong kind of value"
     );
     assert_eq!(
         parse_simple_strings(b"$5\r\nhello\r\n")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "WRONGTYPE Operation against a key holding the wrong kind of value"
     );
 }
@@ -76,25 +76,25 @@ fn test_full_resync_string() {
 fn test_missing_crlf_terminator() {
     // No CRLF at all
     assert_eq!(
-        parse_simple_strings(b"+OK").err().unwrap().message(),
+        parse_simple_strings(b"+OK").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
     // Only \r
     assert_eq!(
-        parse_simple_strings(b"+OK\r").err().unwrap().message(),
+        parse_simple_strings(b"+OK\r").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
     // Only \n
     assert_eq!(
-        parse_simple_strings(b"+OK\n").err().unwrap().message(),
+        parse_simple_strings(b"+OK\n").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
     // Wrong order (\n\r instead of \r\n)
     assert_eq!(
-        parse_simple_strings(b"+OK\n\r").err().unwrap().message(),
+        parse_simple_strings(b"+OK\n\r").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 }
@@ -106,7 +106,7 @@ fn test_invalid_characters_in_content() {
         parse_simple_strings(b"+Hello\rWorld\r\n")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR invalid value"
     );
 
@@ -115,7 +115,7 @@ fn test_invalid_characters_in_content() {
         parse_simple_strings(b"+Hello\nWorld\r\n")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR invalid value"
     );
 }
@@ -123,7 +123,7 @@ fn test_invalid_characters_in_content() {
 #[test]
 fn test_empty_input() {
     assert_eq!(
-        parse_simple_strings(b"").err().unwrap().message(),
+        parse_simple_strings(b"").err().unwrap().to_string(),
         "ERR Empty data"
     );
 }

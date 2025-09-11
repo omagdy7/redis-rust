@@ -1,16 +1,20 @@
-use crate::frame::Frame;
-use crate::rdb::{ExpiryUnit, FromBytes, RDBFile, RedisValue};
-use crate::commands::RedisCommand;
-use crate::parser::parse;
-use crate::shared_cache::{Cache, CacheEntry};
-use crate::types::*;
 use bytes::Bytes;
 use regex::Regex;
 use std::{collections::HashMap, sync::Arc};
-use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::{
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::TcpStream,
+    sync::Mutex,
+};
 use tracing::{error, info};
+
+use crate::commands::RedisCommand;
+use crate::error::RespError;
+use crate::frame::Frame;
+use crate::parser::parse;
+use crate::rdb::{ExpiryUnit, FromBytes, RDBFile, RedisValue};
+use crate::shared_cache::{Cache, CacheEntry};
+use crate::types::*;
 
 #[derive(Debug, Clone)]
 pub struct SlaveServer {
@@ -54,15 +58,15 @@ impl SlaveRole for SlaveServer {
                 };
 
                 // Step1: PING
-                send_command(&resp_bytes!(array => [resp!(bulk "PING")]), true).await?;
+                send_command(&frame_bytes!(array => [frame!(bulk "PING")]), true).await?;
 
                 let port = self.config.port.clone();
                 // Step2: REPLCONF listening-port <PORT>
                 send_command(
-                    &resp_bytes!(array => [
-                        resp!(bulk "REPLCONF"),
-                        resp!(bulk "listening-port"),
-                        resp!(bulk port)
+                    &frame_bytes!(array => [
+                        frame!(bulk "REPLCONF"),
+                        frame!(bulk "listening-port"),
+                        frame!(bulk port)
                     ]),
                     true,
                 )
@@ -70,10 +74,10 @@ impl SlaveRole for SlaveServer {
 
                 // Step3: REPLCONF capa psync2
                 send_command(
-                    &resp_bytes!(array => [
-                        resp!(bulk "REPLCONF"),
-                        resp!(bulk "capa"),
-                        resp!(bulk "psync2")
+                    &frame_bytes!(array => [
+                        frame!(bulk "REPLCONF"),
+                        frame!(bulk "capa"),
+                        frame!(bulk "psync2")
                     ]),
                     true,
                 )
@@ -81,10 +85,10 @@ impl SlaveRole for SlaveServer {
 
                 // Step 4: PSYNC <REPL_ID> <REPL_OFFSSET>
                 send_command(
-                    &resp_bytes!(array => [
-                        resp!(bulk "PSYNC"),
-                        resp!(bulk "?"),
-                        resp!(bulk "-1")
+                    &frame_bytes!(array => [
+                        frame!(bulk "PSYNC"),
+                        frame!(bulk "?"),
+                        frame!(bulk "-1")
                     ]),
                     false,
                 )
@@ -193,24 +197,35 @@ impl SlaveRole for SlaveServer {
                             // Some commands from master (like REPLCONF) require an acknowledgement.
                             let needs_reply = matches!(command, RedisCommand::ReplConf(..));
 
-                            let response = <SlaveServer as CommandHandler<TcpStream>>::execute(
-                                &server_clone,
-                                command,
-                            )
-                            .await;
+                            let response =
+                                <SlaveServer as CommandHandler<TcpStream>>::execute(&self, command)
+                                    .await;
 
-                            if needs_reply && !response.is_empty() {
-                                info!("Slave responding to master: {}", bytes_to_ascii(&response));
-                                let master_connection = {
-                                    let state_guard = state.lock().await;
-                                    state_guard.connection.clone()
-                                };
+                            match response {
+                                Ok(response_bytes) => {
+                                    if needs_reply && !response_bytes.is_empty() {
+                                        info!(
+                                            "Slave responding to master: {}",
+                                            bytes_to_ascii(&response_bytes)
+                                        );
+                                        let master_connection = {
+                                            let state_guard = state.lock().await;
+                                            state_guard.connection.clone()
+                                        };
 
-                                if let Some(conn_arc) = master_connection {
-                                    let mut stream_guard = conn_arc.lock().await;
-                                    if let Err(e) = stream_guard.write_all(&response).await {
-                                        return Err(e.to_string());
+                                        if let Some(conn_arc) = master_connection {
+                                            let mut stream_guard = conn_arc.lock().await;
+                                            if let Err(e) =
+                                                stream_guard.write_all(&response_bytes).await
+                                            {
+                                                return Err(e.to_string());
+                                            }
+                                        }
                                     }
+                                }
+                                Err(error) => {
+                                    error!("Command execution error: {:?}", error);
+                                    // For now, just log the error and continue
                                 }
                             }
 
@@ -270,47 +285,44 @@ impl SlaveRole for SlaveServer {
 }
 
 impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
-    async fn execute(&self, command: RedisCommand) -> Vec<u8> {
+    async fn execute(&self, command: RedisCommand) -> Result<Vec<u8>, RespError> {
         use RedisCommand as RC;
         match command {
-            RC::Ping => resp_bytes!("PONG"),
-            RC::Echo(echo_string) => resp_bytes!(echo_string),
+            RC::Ping => Ok(frame_bytes!("PONG")),
+            RC::Echo(echo_string) => Ok(frame_bytes!(echo_string)),
             RC::Get(key) => {
-                let mut cache = self.cache.lock().await;
+                let cache = self.cache.lock().await;
                 match cache.get(&key).cloned() {
-                    Some(entry) if !entry.is_expired() => entry.value.to_resp_bytes(),
-                    Some(_) => {
-                        cache.remove(&key); // Clean up expired key
-                        resp_bytes!(null)
-                    }
-                    None => resp_bytes!(null),
+                    Some(entry) if !entry.is_expired() => Ok(entry.value.to_resp()),
+                    Some(_) => Ok(frame_bytes!(null)),
+                    None => Ok(frame_bytes!(null)),
                 }
             }
             RC::Type(_key) => {
                 todo!()
             }
             RC::ConfigGet(s) => match s.as_str() {
-                "dir" => {
-                    resp_bytes!(array => [resp!(bulk s), resp!(bulk self.config.dir.as_deref().unwrap_or(""))])
-                }
-                "dbfilename" => {
-                    resp_bytes!(array => [resp!(bulk self.config.dbfilename.as_deref().unwrap_or(""))])
-                }
-                _ => resp_bytes!(array => []),
+                "dir" => Ok(
+                    frame_bytes!(array => [frame!(bulk s), frame!(bulk self.config.dir.as_deref().unwrap_or(""))]),
+                ),
+                "dbfilename" => Ok(
+                    frame_bytes!(array => [frame!(bulk s), frame!(bulk self.config.dbfilename.as_deref().unwrap_or(""))]),
+                ),
+                _ => Ok(frame_bytes!(array => [])),
             },
             RC::Keys(query) => {
                 let query = query.replace('*', ".*");
                 let cache = self.cache.lock().await;
                 let regex = match Regex::new(&query) {
                     Ok(regex) => regex,
-                    Err(_) => return resp_bytes!(error "ERR invalid regex pattern"),
+                    Err(_) => return Err(RespError::InvalidArgument),
                 };
                 let matching_keys: Vec<Frame> = cache
                     .keys()
                     .filter(|key| regex.is_match(key))
                     .map(|key| Frame::BulkString(Bytes::copy_from_slice(key.as_bytes())))
                     .collect();
-                Frame::Array(matching_keys).to_resp_bytes()
+                Ok(Frame::Array(matching_keys).to_resp())
             }
             RC::Info(_sub_command) => {
                 // Slaves respond with their role
@@ -319,7 +331,7 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                     "# Replication\r\nrole:slave\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
                     state.master_replid, state.master_repl_offset,
                 );
-                resp_bytes!(bulk info_response)
+                Ok(frame_bytes!(bulk info_response))
             }
             RC::Set(command) => {
                 // For a slave, write commands are read-only by default. This could be configurable.
@@ -335,7 +347,7 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                     },
                 );
                 // Slaves do not propagate writes and typically respond with OK.
-                resp_bytes!("OK")
+                Ok(frame_bytes!("OK"))
             }
             RC::Xadd {
                 key: _,
@@ -362,18 +374,18 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
             RC::ReplConf((op1, op2)) => {
                 if op1.to_uppercase() == "GETACK" && op2 == "*" {
                     let state = self.state.lock().await;
-                    resp_bytes!(array => [
-                        resp!(bulk "REPLCONF"),
-                        resp!(bulk "ACK"),
-                        resp!(bulk state.master_repl_offset.to_string())
-                    ])
+                    Ok(frame_bytes!(array => [
+                        frame!(bulk "REPLCONF"),
+                        frame!(bulk "ACK"),
+                        frame!(bulk state.master_repl_offset.to_string())
+                    ]))
                 } else {
-                    resp_bytes!("OK") // For other REPLCONFs during handshake
+                    Ok(frame_bytes!("OK")) // For other REPLCONFs during handshake
                 }
             }
-            RC::Psync(_) => resp_bytes!(error "ERR PSYNC not supported on slave"),
-            RC::Wait(_) => resp_bytes!(error "ERR WAIT cannot be used with replica."),
-            RC::Invalid => resp_bytes!(error "ERR Invalid Command"),
+            RC::Psync(_) => Ok(RespError::OperationNotSupported.to_resp()),
+            RC::Wait(_) => Ok(frame_bytes!(error "ERR WAIT cannot be used with replica.")),
+            RC::Invalid => Ok(RespError::InvalidCommandSyntax.to_resp()),
         }
     }
 }

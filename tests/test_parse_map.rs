@@ -187,7 +187,7 @@ fn test_invalid_maps() {
         parse_maps(b"+2\r\n+key\r\n+value\r\n")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR Invalid data type"
     );
 
@@ -196,46 +196,46 @@ fn test_invalid_maps() {
         parse_maps(b"*2\r\n+key\r\n+value\r\n")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR Invalid data type"
     );
 
     // Missing \r\n terminator after count
     assert_eq!(
-        parse_maps(b"%1\r\n+key\r\n+value").err().unwrap().message(),
+        parse_maps(b"%1\r\n+key\r\n+value").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
     // Invalid length - negative
     assert_eq!(
-        parse_maps(b"%-1\r\n").err().unwrap().message(),
+        parse_maps(b"%-1\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Non-numeric length
     assert_eq!(
-        parse_maps(b"%abc\r\n").err().unwrap().message(),
+        parse_maps(b"%abc\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Odd number of elements (maps need key-value pairs)
     assert_eq!(
-        parse_maps(b"%1\r\n+key\r\n").err().unwrap().message(),
+        parse_maps(b"%1\r\n+key\r\n").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
     // Incomplete map elements
     assert_eq!(
-        parse_maps(b"%1\r\n+key\r\n").err().unwrap().message(),
+        parse_maps(b"%1\r\n+key\r\n").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
     // Empty input
-    assert_eq!(parse_maps(b"").err().unwrap().message(), "ERR Empty data");
+    assert_eq!(parse_maps(b"").err().unwrap().to_string(), "ERR Empty data");
 
     // Just the marker
     assert_eq!(
-        parse_maps(b"%").err().unwrap().message(),
+        parse_maps(b"%").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
@@ -244,7 +244,7 @@ fn test_invalid_maps() {
         parse_maps(b"%1\r\n@invalid\r\n+value\r\n")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR Invalid data type"
     );
 }

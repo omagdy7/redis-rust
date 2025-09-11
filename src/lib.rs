@@ -2,6 +2,7 @@
 pub mod macros;
 pub mod cleanup;
 pub mod client_handler;
+pub mod error;
 pub mod frame;
 pub mod master;
 pub mod rdb;

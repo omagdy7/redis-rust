@@ -1,15 +1,19 @@
-use crate::frame::Frame;
-use crate::commands::{ExpiryOption, RedisCommand, SetCondition};
-use crate::shared_cache::{Cache, CacheEntry};
-use crate::stream::{StreamEntry, StreamId, XReadStreamId, XrangeStreamdId};
-use crate::types::*;
 use bytes::Bytes;
 use regex::Regex;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-use tokio::io::AsyncWriteExt;
-use tokio::sync::{Mutex, Notify, mpsc::Sender};
-use tokio::time::Duration;
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{Mutex, Notify, mpsc::Sender},
+    time::Duration,
+};
 use tracing::{error, info};
+
+use crate::commands::{ExpiryOption, RedisCommand, SetCondition};
+use crate::error::RespError;
+use crate::frame::Frame;
+use crate::shared_cache::{Cache, CacheEntry};
+use crate::stream::{StreamEntry, StreamId, XReadStreamId, XrangeStreamdId};
+use crate::types::*;
 
 #[derive(Debug, Clone)]
 pub struct MasterServer {
@@ -139,17 +143,17 @@ impl MasterServer {
 }
 
 impl CommandHandler<BoxedAsyncWrite> for MasterServer {
-    async fn execute(&self, command: RedisCommand) -> Vec<u8> {
+    async fn execute(&self, command: RedisCommand) -> Result<Vec<u8>, RespError> {
         use RedisCommand as RC;
 
         match command {
             RC::Ping => {
                 info!("Received PING command");
-                resp_bytes!("PONG")
+                Ok(frame_bytes!("PONG"))
             }
             RC::Echo(echo_string) => {
                 info!("Received ECHO command: {}", echo_string);
-                resp_bytes!(echo_string)
+                Ok(frame_bytes!(echo_string))
             }
             RC::Get(key) => {
                 info!("Received GET command for key: {}", key);
@@ -160,16 +164,16 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                 match cache.get(&key).cloned() {
                     Some(entry) if !entry.is_expired() => {
                         info!("Key {} found and not expired", key);
-                        entry.value.to_resp_bytes()
+                        Ok(entry.value.to_resp())
                     }
                     Some(_) => {
                         info!("Key {} expired, removing", key);
                         cache.remove(&key); // Clean up expired key
-                        resp_bytes!(null)
+                        Ok(frame_bytes!(null))
                     }
                     None => {
                         info!("Key {} not found", key);
-                        resp_bytes!(null)
+                        Ok(frame_bytes!(null))
                     }
                 }
             }
@@ -191,15 +195,15 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                             Frame::Stream(_) => "stream",
                             _ => "string", // Default to string for other types
                         };
-                        resp_bytes!(type_str)
+                        Ok(frame_bytes!(type_str))
                     }
                     Some(_) => {
                         info!("Key {} expired, removing", key);
-                        resp_bytes!(null)
+                        Ok(frame_bytes!(null))
                     }
                     None => {
                         info!("Key {} not found", key);
-                        resp_bytes!("none")
+                        Ok(frame_bytes!("none"))
                     }
                 }
             }
@@ -217,7 +221,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     || (matches!(command.condition, Some(SetCondition::Exists)) && !key_exists)
                 {
                     info!("SET condition not met for key {}", command.key);
-                    return resp_bytes!(null);
+                    return Ok(frame_bytes!(null));
                 }
 
                 let get_value = if command.get_old_value {
@@ -253,10 +257,10 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                 info!("Released cache lock for SET");
 
                 // Broadcast message to replicas
-                let broadcast_cmd = resp_bytes!(array => [
-                    resp!(bulk "SET"),
-                    resp!(bulk command.key),
-                    resp!(bulk command.value)
+                let broadcast_cmd = frame_bytes!(array => [
+                    frame!(bulk "SET"),
+                    frame!(bulk command.key),
+                    frame!(bulk command.value)
                 ]);
 
                 let broadcast_cmd_len = broadcast_cmd.len();
@@ -278,11 +282,11 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                 info!("Sent broadcast to replicas");
 
                 if !command.get_old_value {
-                    resp_bytes!("OK")
+                    Ok(frame_bytes!("OK"))
                 } else {
                     match get_value {
-                        Some(val) => val.to_resp_bytes(),
-                        None => resp_bytes!(null),
+                        Some(val) => Ok(val.to_resp()),
+                        None => Ok(frame_bytes!(null)),
                     }
                 }
             }
@@ -293,7 +297,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
             } => {
                 info!("Received Xadd command (not handled here)");
                 // PSYNC is handled specially in `handle_client`, this is a fallback.
-                resp_bytes!(error "ERR PSYNC logic error")
+                Err(RespError::InvalidStreamOperation)
             }
             RC::XRange { key, start, end } => {
                 info!("Received XRange command for key: {}", key);
@@ -349,11 +353,11 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         let mut filtered_frames = vec![];
                         for stream in filtered_streams {
                             let id_str = stream.id.to_string();
-                            filtered_frames.push(vec![resp!(bulk id_str)]);
+                            filtered_frames.push(vec![frame!(bulk id_str)]);
                             let fields = stream
                                         .fields
                                         .iter()
-                                        .map(|(key, value)| resp!(array => [resp!(bulk key.clone()), resp!(bulk value.clone())]))
+                                        .map(|(key, value)| frame!(array => [frame!(bulk key.clone()), frame!(bulk value.clone())]))
                                         .collect::<Vec<Frame>>();
                             filtered_frames
                                 .last_mut()
@@ -362,13 +366,13 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         }
                         let filtered_frames: Vec<Frame> = filtered_frames
                             .into_iter()
-                            .map(|x| resp!(array => x))
+                            .map(|x| frame!(array => x))
                             .collect();
-                        return resp_bytes!(array => filtered_frames);
+                        return Ok(frame_bytes!(array => filtered_frames));
                     }
                 }
 
-                resp_bytes!(error "ERR")
+                Ok(frame_bytes!(error "ERR"))
             }
 
             RC::XRead {
@@ -427,7 +431,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                             Err(_) => {
                                 info!("XREAD timed out after {}ms", timeout_ms);
                                 // Return null on timeout with no new entries
-                                return resp_bytes!(null_array);
+                                return Ok(frame_bytes!(null_array));
                             }
                         }
                     }
@@ -463,15 +467,15 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                         .fields
                                         .iter()
                                         .flat_map(|(k, v)| {
-                                            vec![resp!(bulk k.clone()), resp!(bulk v.clone())]
+                                            vec![frame!(bulk k.clone()), frame!(bulk v.clone())]
                                         })
                                         .collect::<Vec<Frame>>();
                                     // Each entry: ["0-1", ["temperature", "65"]]
-                                    let entry = resp!(array => [resp!(bulk id_str), resp!(array => fields)]);
+                                    let entry = frame!(array => [frame!(bulk id_str), frame!(array => fields)]);
                                     entries.push(entry);
                                 }
                                 // Wrap into: ["grape", [entries...]]
-                                let stream_resp = resp!(array => [resp!(bulk key.clone()), resp!(array => entries)]);
+                                let stream_resp = frame!(array => [frame!(bulk key.clone()), frame!(array => entries)]);
                                 stream_responses.push(stream_resp);
                             }
                         }
@@ -480,24 +484,24 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
 
                 // If no streams have new entries, return null
                 if stream_responses.is_empty() {
-                    return resp_bytes!(null);
+                    return Ok(frame_bytes!(null));
                 }
 
                 // Final response is an array of streams
-                resp_bytes!(array => stream_responses)
+                Ok(frame_bytes!(array => stream_responses))
             }
             RC::ConfigGet(s) => {
                 info!("Received CONFIG GET for key: {}", s);
                 match s.as_str() {
-                    "dir" => resp_bytes!(array => [
-                        resp!(bulk s),
-                        resp!(bulk self.config.dir.as_deref().unwrap_or(""))
-                    ]),
-                    "dbfilename" => resp_bytes!(array => [
-                        resp!(bulk s),
-                        resp!(bulk self.config.dbfilename.as_deref().unwrap_or(""))
-                    ]),
-                    _ => resp_bytes!(array => []),
+                    "dir" => Ok(frame_bytes!(array => [
+                        frame!(bulk s),
+                        frame!(bulk self.config.dir.as_deref().unwrap_or(""))
+                    ])),
+                    "dbfilename" => Ok(frame_bytes!(array => [
+                        frame!(bulk s),
+                        frame!(bulk self.config.dbfilename.as_deref().unwrap_or(""))
+                    ])),
+                    _ => Ok(frame_bytes!(array => [])),
                 }
             }
             RC::Keys(query) => {
@@ -511,7 +515,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
 
                 let regex = match Regex::new(&query) {
                     Ok(regex) => regex,
-                    Err(_) => return resp_bytes!(error "ERR invalid regex pattern"),
+                    Err(_) => return Err(RespError::InvalidArgument),
                 };
                 let matching_keys: Vec<Frame> = cache
                     .keys()
@@ -520,7 +524,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     .collect();
                 info!("Matched {} keys", matching_keys.len());
 
-                Frame::Array(matching_keys).to_resp_bytes()
+                Ok(Frame::Array(matching_keys).to_resp())
             }
             RC::Info(_sub_command) => {
                 info!("Received INFO command");
@@ -534,18 +538,18 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                 );
                 info!("Generated INFO response");
 
-                resp_bytes!(bulk info_response)
+                Ok(frame_bytes!(bulk info_response))
             }
             RC::ReplConf(_) => {
                 info!("Received REPLCONF command");
                 // Master receives ACKs, but doesn't send a response to them.
-                // Other REPLCONF are part of handshake.
-                resp_bytes!("OK")
+                // Other REPLCONFs are part of handshake.
+                Ok(frame_bytes!("OK"))
             }
             RC::Psync(_) => {
                 info!("Received PSYNC command (not handled here)");
                 // PSYNC is handled specially in `handle_client`, this is a fallback.
-                resp_bytes!(error "ERR PSYNC logic error")
+                Err(RespError::InvalidStreamOperation)
             }
             RC::Wait((no_replicas, time_in_ms)) => {
                 info!(
@@ -560,7 +564,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     }
                     Err(_) => {
                         info!("Failed to parse replicas number");
-                        return resp_bytes!(error "ERR invalid number of replicas");
+                        return Err(RespError::InvalidArgument);
                     }
                 };
 
@@ -571,7 +575,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     }
                     Err(_) => {
                         info!("Failed to parse timeout");
-                        return resp_bytes!(error "ERR invalid timeout");
+                        return Err(RespError::InvalidArgument);
                     }
                 });
 
@@ -601,7 +605,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     info!("Offset=0, returning replica count directly");
                     let num_replicas = get_current_ack_count().await;
                     info!("Number of replicas: {}", num_replicas);
-                    return resp_bytes!(int num_replicas as u64);
+                    return Ok(frame_bytes!(int num_replicas as u64));
                 }
 
                 // Check if the condition is already met before waiting.
@@ -611,14 +615,14 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         "Condition already met ({} >= {})",
                         initial_count, num_needed
                     );
-                    return resp_bytes!(int initial_count as u64);
+                    return Ok(frame_bytes!(int initial_count as u64));
                 }
 
                 info!("Broadcasting GETACK to replicas");
-                let getack_cmd = resp_bytes!(array => [
-                    resp!(bulk "REPLCONF"),
-                    resp!(bulk "GETACK"),
-                    resp!(bulk "*")
+                let getack_cmd = frame_bytes!(array => [
+                    frame!(bulk "REPLCONF"),
+                    frame!(bulk "GETACK"),
+                    frame!(bulk "*")
                 ]);
                 let _ = self
                     .replication_msg_sender
@@ -661,11 +665,11 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                 };
 
                 info!("WAIT returning final_count={}", final_count);
-                resp_bytes!(int final_count as u64)
+                Ok(frame_bytes!(int final_count as u64))
             }
             RC::Invalid => {
                 info!("Received INVALID command");
-                resp_bytes!(error "ERR Invalid Command")
+                Err(RespError::InvalidCommandSyntax)
             }
         }
     }

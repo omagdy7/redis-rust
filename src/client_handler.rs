@@ -7,6 +7,7 @@ use tokio::{
 };
 use tracing::{error, info};
 
+use crate::error::RespError;
 use crate::frame::Frame;
 use crate::parser::parse;
 use crate::server::RedisServer;
@@ -139,7 +140,7 @@ async fn handle_psync(
         info!("Master state lock acquired, replid={}", replid);
 
         let response_str = format!("FULLRESYNC {} 0", replid);
-        let full_resync_response = resp_bytes!(response_str);
+        let full_resync_response = frame_bytes!(response_str);
 
         // Add this connection to the list of replicas
         info!("Adding client {} as replica", socket_addr);
@@ -178,7 +179,7 @@ async fn handle_psync(
     } else {
         // A slave should not receive a PSYNC command from a client
         info!("Server is Slave, rejecting PSYNC command");
-        let response = resp_bytes!(error "ERR PSYNC not supported on slave");
+        let response = RespError::OperationNotSupported.to_resp();
         writer.lock().await.write_all(&response).await?;
         info!("Sent PSYNC error response to {}", socket_addr);
     }
@@ -214,24 +215,23 @@ async fn handle_xadd(
     let stream_id = match resolve_stream_id(parsed_id, last_id) {
         Ok(id) => id,
         Err(e) => {
-            let response = resp_bytes!(error e);
+            let response = frame_bytes!(error e);
             writer.lock().await.write_all(&response).await?;
             // HACK: I feel this could cause weird issues in the future
             return Ok(());
         }
     };
 
-    let mut response = resp_bytes!(bulk stream_id.to_string());
+    let mut response = frame_bytes!(bulk stream_id.to_string());
 
     let stream_entry = StreamEntry::new(stream_id, fields);
 
     if let Some(entry) = cache.get_mut(&key) {
         if let Frame::Stream(ref mut vec) = entry.value {
             if stream_id == (StreamId { ms_time: 0, seq: 0 }) {
-                response =
-                    resp_bytes!(error "ERR The ID specified in XADD must be greater than 0-0");
+                response = RespError::StreamIdTooSmall.to_resp();
             } else if stream_id <= vec.last().unwrap().id {
-                response = resp_bytes!(error "ERR The ID specified in XADD is equal or smaller than the target stream top item");
+                response = RespError::StreamIdNotGreater.to_resp();
             } else {
                 vec.push(stream_entry);
                 xadd_notifier.unwrap().notify_waiters();
@@ -262,7 +262,6 @@ async fn handle_xadd(
 // helper function for REPLCONF ACK handling
 async fn handle_replconf_ack(
     socket_addr: SocketAddr,
-    op1: &str,
     op2: &str,
     acks_map: Option<&SharedMut<HashMap<SocketAddr, usize>>>,
     ack_notifier: Option<&Arc<Notify>>,
@@ -316,10 +315,10 @@ async fn handle_generic_command(
 
     // Special handling for REPLCONF ACK if master
     if role == "master" {
-        if let RedisCommand::ReplConf((ref op1, ref op2)) = command {
+            if let RedisCommand::ReplConf((ref op1, ref op2)) = command {
             info!("Received REPLCONF command: op1={}, op2={}", op1, op2);
             if op1.to_uppercase() == "ACK" {
-                handle_replconf_ack(socket_addr, op1, op2, acks_map, ack_notifier).await?;
+                handle_replconf_ack(socket_addr, op2, acks_map, ack_notifier).await?;
                 // No response needed for ACK
                 return Ok(()); // Continue to the next loop iteration
             }
@@ -330,7 +329,10 @@ async fn handle_generic_command(
         info!("Attempting to lock server for execute()");
         let server_instance = server.lock().await;
         info!("Server lock acquired for execute()");
-        server_instance.execute(command).await
+        match server_instance.execute(command).await {
+            Ok(bytes) => bytes,
+            Err(error) => error.to_resp(),
+        }
     };
 
     info!("Command executed, response size: {}", response.len());

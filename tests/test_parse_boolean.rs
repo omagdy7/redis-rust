@@ -14,49 +14,49 @@ fn test_valid_booleans() {
 fn test_invalid_booleans() {
     // Wrong data type marker
     assert_eq!(
-        parse_boolean(b":t\r\n").err().unwrap().message(),
+        parse_boolean(b":t\r\n").err().unwrap().to_string(),
         "ERR Invalid data type"
     );
 
     // Invalid boolean value
     assert_eq!(
-        parse_boolean(b"#x\r\n").err().unwrap().message(),
+        parse_boolean(b"#x\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Missing \r\n terminator
     assert_eq!(
-        parse_boolean(b"#t").err().unwrap().message(),
+        parse_boolean(b"#t").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
     // Only \r without \n
     assert_eq!(
-        parse_boolean(b"#t\r").err().unwrap().message(),
+        parse_boolean(b"#t\r").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
     // Empty input
     assert_eq!(
-        parse_boolean(b"").err().unwrap().message(),
+        parse_boolean(b"").err().unwrap().to_string(),
         "ERR Empty data"
     );
 
     // Just the marker
     assert_eq!(
-        parse_boolean(b"#").err().unwrap().message(),
+        parse_boolean(b"#").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 
     // Case sensitivity
     assert_eq!(
-        parse_boolean(b"#T\r\n").err().unwrap().message(),
+        parse_boolean(b"#T\r\n").err().unwrap().to_string(),
         "ERR invalid value"
     );
 
     // Extra content
     assert_eq!(
-        parse_boolean(b"#ttrue\r\n").err().unwrap().message(),
+        parse_boolean(b"#ttrue\r\n").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 }

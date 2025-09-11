@@ -70,7 +70,7 @@ fn test_valid_simple_errors() {
 fn test_invalid_simple_errors() {
     // Wrong data type marker
     assert_eq!(
-        parse_simple_errors(b"+OK\r\n").err().unwrap().message(),
+        parse_simple_errors(b"+OK\r\n").err().unwrap().to_string(),
         "ERR Invalid data type"
     );
 
@@ -79,7 +79,7 @@ fn test_invalid_simple_errors() {
         parse_simple_errors(b"-ERR invalid\r character\r\n")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR invalid value"
     );
 
@@ -88,7 +88,7 @@ fn test_invalid_simple_errors() {
         parse_simple_errors(b"-ERR invalid\n character\r\n")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR invalid value"
     );
 
@@ -97,7 +97,7 @@ fn test_invalid_simple_errors() {
         parse_simple_errors(b"-ERR no terminator")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR Unexpected end of input"
     );
 
@@ -106,7 +106,7 @@ fn test_invalid_simple_errors() {
         parse_simple_errors(b"-ERR only carriage return\r")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR Unexpected end of input"
     );
 
@@ -115,19 +115,19 @@ fn test_invalid_simple_errors() {
         parse_simple_errors(b"-ERR only newline\n")
             .err()
             .unwrap()
-            .message(),
+            .to_string(),
         "ERR Unexpected end of input"
     );
 
     // Empty input
     assert_eq!(
-        parse_simple_errors(b"").err().unwrap().message(),
+        parse_simple_errors(b"").err().unwrap().to_string(),
         "ERR Empty data"
     );
 
     // Just the marker without content
     assert_eq!(
-        parse_simple_errors(b"-").err().unwrap().message(),
+        parse_simple_errors(b"-").err().unwrap().to_string(),
         "ERR Unexpected end of input"
     );
 }

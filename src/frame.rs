@@ -1,6 +1,8 @@
 use bytes::Bytes;
-use std::collections::{HashMap, HashSet};
-use std::fmt;
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
 
 use crate::rdb;
 use crate::stream::*;
@@ -56,7 +58,7 @@ pub enum Frame {
 
 impl Frame {
     /// Convert Frame to RESP bytes for network transmission
-    pub fn to_resp_bytes(&self) -> Vec<u8> {
+    pub fn to_resp(&self) -> Vec<u8> {
         match self {
             Frame::SimpleString(s) => format!("+{}\r\n", s).into_bytes(),
             Frame::SimpleError(s) => format!("-{}\r\n", s).into_bytes(),
@@ -70,7 +72,7 @@ impl Frame {
                 let len = arr.len();
                 let mut result = format!("*{}\r\n", len).into_bytes();
                 for element in arr {
-                    result.extend(element.to_resp_bytes());
+                    result.extend(element.to_resp());
                 }
                 result
             }
@@ -102,9 +104,9 @@ impl Frame {
                 let mut result = format!("%{}\r\n", len).into_bytes();
                 for (key, value) in map {
                     result.extend(
-                        Frame::BulkString(Bytes::copy_from_slice(key.as_bytes())).to_resp_bytes(),
+                        Frame::BulkString(Bytes::copy_from_slice(key.as_bytes())).to_resp(),
                     );
-                    result.extend(value.to_resp_bytes());
+                    result.extend(value.to_resp());
                 }
                 result
             }
@@ -145,7 +147,7 @@ impl Frame {
                 let len = attrs.len();
                 let mut result = format!("|{}\r\n", len).into_bytes();
                 for attr in attrs {
-                    result.extend(attr.to_resp_bytes());
+                    result.extend(attr.to_resp());
                 }
                 result
             }
@@ -154,7 +156,7 @@ impl Frame {
                 let mut result = format!("~{}\r\n", len).into_bytes();
                 for item in set {
                     result.extend(
-                        Frame::BulkString(Bytes::copy_from_slice(item.as_bytes())).to_resp_bytes(),
+                        Frame::BulkString(Bytes::copy_from_slice(item.as_bytes())).to_resp(),
                     );
                 }
                 result
@@ -163,7 +165,7 @@ impl Frame {
                 let len = items.len();
                 let mut result = format!(">{}\r\n", len).into_bytes();
                 for item in items {
-                    result.extend(item.to_resp_bytes());
+                    result.extend(item.to_resp());
                 }
                 result
             }
