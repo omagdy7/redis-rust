@@ -1142,127 +1142,67 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 if let Some(entry) = cache.get(&key) {
                     if let Frame::Stream(ref vec) = entry.value {
                         info!(
-                            "In XRANGE execution and for key {} and the Steam is : {:?}",
+                            "In XRANGE execution and for key {} and the Stream is : {:?}",
                             key, vec
                         );
-                        match (start, end) {
-                            (XrangeStreamdId::Literal(start), XrangeStreamdId::Literal(end)) => {
-                                let filtered_streams: Vec<&StreamEntry> = vec
-                                    .iter()
-                                    .filter(|stream| stream.id >= start && stream.id <= end)
-                                    .collect();
+                        let filtered_streams = match (start, end) {
+                            (XrangeStreamdId::Literal(start), XrangeStreamdId::Literal(end)) => vec
+                                .iter()
+                                .filter(|stream| stream.id >= start && stream.id <= end)
+                                .collect::<Vec<&StreamEntry>>(),
+                            (
+                                XrangeStreamdId::AutoSequence { ms_time: start },
+                                XrangeStreamdId::AutoSequence { ms_time: end },
+                            ) => vec
+                                .iter()
+                                .filter(|stream| {
+                                    stream.id.ms_time >= start && stream.id.ms_time <= end
+                                })
+                                .collect::<Vec<&StreamEntry>>(),
+                            (
+                                XrangeStreamdId::AutoStart,
+                                XrangeStreamdId::AutoSequence { ms_time: end },
+                            ) => vec
+                                .iter()
+                                .filter(|stream| stream.id.ms_time <= end)
+                                .collect::<Vec<&StreamEntry>>(),
+                            (XrangeStreamdId::AutoStart, XrangeStreamdId::Literal(end)) => vec
+                                .iter()
+                                .filter(|stream| stream.id <= end)
+                                .collect::<Vec<&StreamEntry>>(),
+                            (
+                                XrangeStreamdId::AutoSequence { ms_time: start },
+                                XrangeStreamdId::AutoEnd,
+                            ) => vec
+                                .iter()
+                                .filter(|stream| stream.id.ms_time >= start)
+                                .collect::<Vec<&StreamEntry>>(),
+                            (XrangeStreamdId::Literal(start), XrangeStreamdId::AutoEnd) => vec
+                                .iter()
+                                .filter(|stream| stream.id >= start)
+                                .collect::<Vec<&StreamEntry>>(),
+                            (_, _) => unreachable!("This is logically impossible"),
+                        };
 
-                                let mut filtered_frames = vec![];
-                                for stream in filtered_streams {
-                                    let id_str = stream.id.to_string();
-                                    filtered_frames.push(vec![resp!(bulk id_str)]);
-                                    let fields = stream
+                        let mut filtered_frames = vec![];
+                        for stream in filtered_streams {
+                            let id_str = stream.id.to_string();
+                            filtered_frames.push(vec![resp!(bulk id_str)]);
+                            let fields = stream
                                         .fields
                                         .iter()
                                         .map(|(key, value)| resp!(array => [resp!(bulk key.clone()), resp!(bulk value.clone())]))
                                         .collect::<Vec<Frame>>();
-                                    filtered_frames
-                                        .last_mut()
-                                        .unwrap()
-                                        .extend_from_slice(&fields);
-                                }
-                                let filtered_frames: Vec<Frame> = filtered_frames
-                                    .into_iter()
-                                    .map(|x| resp!(array => x))
-                                    .collect();
-                                return resp_bytes!(array => filtered_frames);
-                            }
-                            (
-                                XrangeStreamdId::AutoSequence { ms_time: start },
-                                XrangeStreamdId::AutoSequence { ms_time: end },
-                            ) => {
-                                let filtered_streams: Vec<&StreamEntry> = vec
-                                    .iter()
-                                    .filter(|stream| {
-                                        stream.id.ms_time >= start && stream.id.ms_time <= end
-                                    })
-                                    .collect();
-
-                                let mut filtered_frames = vec![];
-                                for stream in filtered_streams {
-                                    let id_str = stream.id.to_string();
-                                    filtered_frames.push(vec![resp!(bulk id_str)]);
-                                    let fields = stream
-                                        .fields
-                                        .values()
-                                        .map(|x| resp!(bulk x.clone()))
-                                        .collect::<Vec<Frame>>();
-                                    filtered_frames
-                                        .last_mut()
-                                        .unwrap()
-                                        .extend_from_slice(&fields);
-                                }
-                                let filtered_frames: Vec<Frame> = filtered_frames
-                                    .into_iter()
-                                    .map(|x| resp!(array => x))
-                                    .collect();
-                                return resp_bytes!(array => filtered_frames);
-                            }
-                            (
-                                XrangeStreamdId::AutoStart,
-                                XrangeStreamdId::AutoSequence { ms_time: end },
-                            ) => {
-                                let filtered_streams: Vec<&StreamEntry> = vec
-                                    .iter()
-                                    .filter(|stream| stream.id.ms_time <= end)
-                                    .collect();
-
-                                let mut filtered_frames = vec![];
-                                for stream in filtered_streams {
-                                    let id_str = stream.id.to_string();
-                                    filtered_frames.push(vec![resp!(bulk id_str)]);
-                                    let fields = stream
-                                        .fields
-                                        .values()
-                                        .map(|x| resp!(bulk x.clone()))
-                                        .collect::<Vec<Frame>>();
-                                    filtered_frames
-                                        .last_mut()
-                                        .unwrap()
-                                        .extend_from_slice(&fields);
-                                }
-                                let filtered_frames: Vec<Frame> = filtered_frames
-                                    .into_iter()
-                                    .map(|x| resp!(array => x))
-                                    .collect();
-                                return resp_bytes!(array => filtered_frames);
-                            }
-                            (
-                                XrangeStreamdId::AutoSequence { ms_time: start },
-                                XrangeStreamdId::AutoEnd,
-                            ) => {
-                                let filtered_streams: Vec<&StreamEntry> = vec
-                                    .iter()
-                                    .filter(|stream| stream.id.ms_time >= start)
-                                    .collect();
-
-                                let mut filtered_frames = vec![];
-                                for stream in filtered_streams {
-                                    let id_str = stream.id.to_string();
-                                    filtered_frames.push(vec![resp!(bulk id_str)]);
-                                    let fields = stream
-                                        .fields
-                                        .values()
-                                        .map(|x| resp!(bulk x.clone()))
-                                        .collect::<Vec<Frame>>();
-                                    filtered_frames
-                                        .last_mut()
-                                        .unwrap()
-                                        .extend_from_slice(&fields);
-                                }
-                                let filtered_frames: Vec<Frame> = filtered_frames
-                                    .into_iter()
-                                    .map(|x| resp!(array => x))
-                                    .collect();
-                                return resp_bytes!(array => filtered_frames);
-                            }
-                            (_, _) => unreachable!("This is logically impossible"),
-                        };
+                            filtered_frames
+                                .last_mut()
+                                .unwrap()
+                                .extend_from_slice(&fields);
+                        }
+                        let filtered_frames: Vec<Frame> = filtered_frames
+                            .into_iter()
+                            .map(|x| resp!(array => x))
+                            .collect();
+                        return resp_bytes!(array => filtered_frames);
                     }
                 }
 
