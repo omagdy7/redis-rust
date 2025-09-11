@@ -5,6 +5,10 @@ macro_rules! resp_bytes {
         Frame::Null.to_resp_bytes()
     };
 
+    (null_array) => {
+        Frame::NullArray.to_resp_bytes()
+    };
+
     // Simple String: resp!("PONG") or resp!(simple "PONG")
     (simple $s:expr) => {
         Frame::SimpleString($s.to_string()).to_resp_bytes()
@@ -32,12 +36,12 @@ macro_rules! resp_bytes {
      (array => [$($elem:expr),*]) => {
          Frame::Array(vec![$($elem),*]).to_resp_bytes()
      };
- 
+
      (array => $vec:expr) => {
          Frame::Array($vec).to_resp_bytes()
      };
- 
- 
+
+
      // Boolean: resp!(bool true)
     (bool $b:expr) => {
         Frame::Boolean($b).to_resp_bytes()
@@ -96,6 +100,10 @@ macro_rules! resp {
     // Null: resp!(null)
     (null) => {
         Frame::Null
+    };
+
+    (null_array) => {
+        Frame::NullArray
     };
 
     // Simple String: resp!("PONG") or resp!(simple "PONG")

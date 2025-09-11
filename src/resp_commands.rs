@@ -138,6 +138,7 @@ pub enum RedisCommand {
         end: XrangeStreamdId,
     },
     XRead {
+        block_param: Option<u64>, // time in ms
         keys: Vec<String>,
         stream_ids: Vec<StreamId>,
     },
@@ -333,6 +334,19 @@ impl From<Frame> for RedisCommand {
                 }
             }
             "XREAD" => {
+                let mut args = args.peekable();
+
+                // Handle optional BLOCK argument
+                let block_param = if args.peek().map(|s| s.as_str()) == Some("block") {
+                    args.next(); // consume "block"
+                    match args.next().and_then(|s| s.parse::<u64>().ok()) {
+                        Some(ms) => Some(ms),
+                        None => return Self::Invalid,
+                    }
+                } else {
+                    None
+                };
+
                 // to consume the 'streams' literal
                 let Some(_) = args.next() else {
                     return Self::Invalid;
@@ -348,6 +362,7 @@ impl From<Frame> for RedisCommand {
                     .collect();
 
                 Self::XRead {
+                    block_param,
                     keys: args,
                     stream_ids,
                 }

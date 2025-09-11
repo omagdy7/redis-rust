@@ -12,7 +12,11 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use codecrafters_redis::{frame::Frame, resp_parser::parse, server::SlaveServer};
+use codecrafters_redis::{
+    frame::{Frame, StreamEntry, StreamId},
+    resp_parser::parse,
+    server::{SlaveServer, resolve_stream_id},
+};
 use codecrafters_redis::{
     rdb::{KeyExpiry, ParseError, RDBFile, RedisValue},
     resp_bytes,
@@ -76,8 +80,10 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
     socket_addr: SocketAddr,
     server: SharedMut<RedisServer<W>>,
     role: &str,
+    cache: SharedMut<Cache>,
     acks_map: Option<SharedMut<HashMap<SocketAddr, usize>>>,
     ack_notifier: Option<Arc<Notify>>,
+    xadd_notifier: Option<Arc<Notify>>,
 ) -> Result<()> {
     info!("Starting handle_client for {}", socket_addr);
 
@@ -115,142 +121,212 @@ async fn handle_client<W: AsyncWrite + Send + Unpin + 'static>(
         let command = RedisCommand::from(request.clone());
         info!("Converted request to RedisCommand: {:?}", command);
 
-        // Special handling for PSYNC ---
-        if let RedisCommand::Psync(_) = command {
-            info!("Handling PSYNC command for client {}", socket_addr);
+        match command {
+            // Special handling for PSYNC ---
+            RedisCommand::Psync(_) => {
+                info!("Handling PSYNC command for client {}", socket_addr);
 
-            let (server_state, sender) = {
-                info!("Attempting to lock server for PSYNC state and sender");
-                let server_instance = server.lock().await;
-                info!("Server lock acquired for PSYNC");
-                (
-                    server_instance.get_server_state_owned(),
-                    server_instance.get_replication_msg_sender().await,
-                )
-            };
+                let (server_state, sender) = {
+                    info!("Attempting to lock server for PSYNC state and sender");
+                    let server_instance = server.lock().await;
+                    info!("Server lock acquired for PSYNC");
+                    (
+                        server_instance.get_server_state_owned(),
+                        server_instance.get_replication_msg_sender().await,
+                    )
+                };
 
-            if let ServerState::MasterState(master) = server_state {
-                info!("Server is Master, fulfilling PSYNC handshake");
+                if let ServerState::MasterState(master) = server_state {
+                    info!("Server is Master, fulfilling PSYNC handshake");
 
-                // Fulfill the master side of the handshake
-                info!("Attempting to lock master state for replid");
+                    // Fulfill the master side of the handshake
+                    info!("Attempting to lock master state for replid");
 
-                let master_state_guard = master.lock().await;
-                let replid = master_state_guard.replid();
+                    let master_state_guard = master.lock().await;
+                    let replid = master_state_guard.replid();
 
-                info!("Master state lock acquired, replid={}", replid);
+                    info!("Master state lock acquired, replid={}", replid);
 
-                let response_str = format!("FULLRESYNC {} 0", replid);
-                let full_resync_response = resp_bytes!(response_str);
+                    let response_str = format!("FULLRESYNC {} 0", replid);
+                    let full_resync_response = resp_bytes!(response_str);
 
-                // Add this connection to the list of replicas
-                info!("Adding client {} as replica", socket_addr);
-                if let Some(sender) = sender {
-                    sender
-                        .send(ReplicationMsg::AddReplica(socket_addr, writer.clone()))
-                        .await
-                        .context("Failed to add replica")?;
+                    // Add this connection to the list of replicas
+                    info!("Adding client {} as replica", socket_addr);
+                    if let Some(sender) = sender {
+                        sender
+                            .send(ReplicationMsg::AddReplica(socket_addr, writer.clone()))
+                            .await
+                            .context("Failed to add replica")?;
+                    } else {
+                        return Err(anyhow::anyhow!(
+                            "Replication sender not available in master mode"
+                        ));
+                    }
+                    info!("Replica {} added successfully", socket_addr);
+                    let server_guard = server.lock().await;
+
+                    info!("adding acks of master's replica: {}", socket_addr);
+                    if let RedisServer::Master(master) = &*server_guard {
+                        master.acks.lock().await.insert(socket_addr, 0);
+                    }
+
+                    // Lock the writer to send the multi-part response
+                    info!("Attempting to lock writer for FULLRESYNC response");
+                    let mut writer_guard = writer.lock().await;
+                    info!("Writer lock acquired for FULLRESYNC response");
+                    writer_guard.write_all(&full_resync_response).await?;
+                    info!("Sent FULLRESYNC response to {}", socket_addr);
+
+                    if let Err(e) = send_empty_rdb(&mut *writer_guard).await {
+                        error!("Failed to send empty RDB: {}", e);
+                    }
+                    info!("Sent empty RDB to {}", socket_addr);
+
+                    writer_guard.flush().await?;
+                    info!("Flushed writer after FULLRESYNC to {}", socket_addr);
                 } else {
-                    return Err(anyhow::anyhow!(
-                        "Replication sender not available in master mode"
-                    ));
-                }
-                info!("Replica {} added successfully", socket_addr);
-                let server_guard = server.lock().await;
-
-                info!("adding acks of master's replica: {}", socket_addr);
-                if let RedisServer::Master(master) = &*server_guard {
-                    master.acks.lock().await.insert(socket_addr, 0);
+                    // A slave should not receive a PSYNC command from a client
+                    info!("Server is Slave, rejecting PSYNC command");
+                    let response = resp_bytes!(error "ERR PSYNC not supported on slave");
+                    writer.lock().await.write_all(&response).await?;
+                    info!("Sent PSYNC error response to {}", socket_addr);
                 }
 
-                // Lock the writer to send the multi-part response
-                info!("Attempting to lock writer for FULLRESYNC response");
-                let mut writer_guard = writer.lock().await;
-                info!("Writer lock acquired for FULLRESYNC response");
-                writer_guard.write_all(&full_resync_response).await?;
-                info!("Sent FULLRESYNC response to {}", socket_addr);
-
-                if let Err(e) = send_empty_rdb(&mut *writer_guard).await {
-                    error!("Failed to send empty RDB: {}", e);
-                }
-                info!("Sent empty RDB to {}", socket_addr);
-
-                writer_guard.flush().await?;
-                info!("Flushed writer after FULLRESYNC to {}", socket_addr);
-            } else {
-                // A slave should not receive a PSYNC command from a client
-                info!("Server is Slave, rejecting PSYNC command");
-                let response = resp_bytes!(error "ERR PSYNC not supported on slave");
-                writer.lock().await.write_all(&response).await?;
-                info!("Sent PSYNC error response to {}", socket_addr);
+                // Skip the generic command handling below and wait for the next command
+                continue;
             }
+            RedisCommand::Xadd {
+                key,
+                parsed_id,
+                fields,
+            } => {
+                info!("Received XADD command for key: {}", key);
+                info!("Attempting to lock cache for XADD");
+                let mut cache = cache.lock().await;
+                info!("Cache lock acquired for XADD");
 
-            // Skip the generic command handling below and wait for the next command
-            continue;
-        } else {
-            // Generic command handling for all other commands ---
-            info!(
-                "Handling generic command {:?} from {}",
-                command, socket_addr
-            );
+                // Get the last stream entry to determine the next ID
+                let last_id = if let Some(entry) = cache.get(&key) {
+                    if let Frame::Stream(ref vec) = entry.value {
+                        vec.last().map(|e| e.id)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
 
-            // Special handling for REPLCONF ACK if master
-            if role == "master" {
-                if let RedisCommand::ReplConf((ref op1, ref op2)) = command {
-                    info!("Received REPLCONF command: op1={}, op2={}", op1, op2);
-                    if op1.to_uppercase() == "ACK" {
-                        info!("Handling REPLCONF ACK from {}", socket_addr);
-                        if let Ok(offset) = op2.parse::<usize>() {
-                            // ---- START REFACTORED CODE ----
-                            // We use the passed-in acks_map and notifier, avoiding the main server lock.
-                            if let (Some(acks), Some(notifier)) = (&acks_map, &ack_notifier) {
-                                info!("Attempting to acquire acks_guard mutex directly");
-                                let mut acks_guard = acks.lock().await;
-                                info!("Successfully acquired acks_guard mutex");
+                let stream_id = match resolve_stream_id(parsed_id, last_id) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        let response = resp_bytes!(error e);
+                        writer.lock().await.write_all(&response).await?;
+                        // HACK: I feel this could cause weird issues in the future
+                        return Ok(());
+                    }
+                };
 
-                                if let Some(o) = acks_guard.get_mut(&socket_addr) {
-                                    info!(
-                                        "Updating ack of {:?} of offset {} to offset {}",
-                                        socket_addr, o, offset
-                                    );
-                                    *o = offset;
-                                }
-                                // Drop the lock explicitly before notifying to be clean
-                                drop(acks_guard);
-                                // Notify any waiting WAIT commands
-                                notifier.notify_waiters();
-                                info!("Notified waiters after ACK update.");
-                            }
-                            // ---- END REFACTORED CODE ----
-                            else {
-                                info!("Error: Received ACK but acks_map/notifier not available.");
-                            }
+                let mut response = resp_bytes!(bulk stream_id.to_string());
+
+                let stream_entry = StreamEntry::new(stream_id, fields);
+
+                if let Some(entry) = cache.get_mut(&key) {
+                    if let Frame::Stream(ref mut vec) = entry.value {
+                        if stream_id == (StreamId { ms_time: 0, seq: 0 }) {
+                            response = resp_bytes!(error "ERR The ID specified in XADD must be greater than 0-0");
+                        } else if stream_id <= vec.last().unwrap().id {
+                            response = resp_bytes!(error "ERR The ID specified in XADD is equal or smaller than the target stream top item");
                         } else {
-                            info!("Failed to parse ACK offset from {}", op2);
+                            vec.push(stream_entry);
+                            xadd_notifier.as_ref().unwrap().notify_waiters();
                         }
-                        // No response needed for ACK
-                        continue; // Continue to the next loop iteration
+                    } else {
+                        entry.value = Frame::Stream(vec![stream_entry]);
+                    }
+                } else {
+                    cache.insert(
+                        key.clone(),
+                        CacheEntry {
+                            value: Frame::Stream(vec![stream_entry]),
+                            expires_at: None,
+                        },
+                    );
+                }
+
+                info!("Inserted/key {}", key);
+
+                drop(cache);
+
+                writer.lock().await.write_all(&response).await?;
+                writer.lock().await.flush().await?;
+            }
+            _ => {
+                // Generic command handling for all other commands ---
+                info!(
+                    "Handling generic command {:?} from {}",
+                    command, socket_addr
+                );
+
+                // Special handling for REPLCONF ACK if master
+                if role == "master" {
+                    if let RedisCommand::ReplConf((ref op1, ref op2)) = command {
+                        info!("Received REPLCONF command: op1={}, op2={}", op1, op2);
+                        if op1.to_uppercase() == "ACK" {
+                            info!("Handling REPLCONF ACK from {}", socket_addr);
+                            if let Ok(offset) = op2.parse::<usize>() {
+                                // ---- START REFACTORED CODE ----
+                                // We use the passed-in acks_map and notifier, avoiding the main server lock.
+                                if let (Some(acks), Some(notifier)) = (&acks_map, &ack_notifier) {
+                                    info!("Attempting to acquire acks_guard mutex directly");
+                                    let mut acks_guard = acks.lock().await;
+                                    info!("Successfully acquired acks_guard mutex");
+
+                                    if let Some(o) = acks_guard.get_mut(&socket_addr) {
+                                        info!(
+                                            "Updating ack of {:?} of offset {} to offset {}",
+                                            socket_addr, o, offset
+                                        );
+                                        *o = offset;
+                                    }
+                                    // Drop the lock explicitly before notifying to be clean
+                                    drop(acks_guard);
+                                    // Notify any waiting WAIT commands
+                                    notifier.notify_waiters();
+                                    info!("Notified waiters after ACK update.");
+                                }
+                                // ---- END REFACTORED CODE ----
+                                else {
+                                    info!(
+                                        "Error: Received ACK but acks_map/notifier not available."
+                                    );
+                                }
+                            } else {
+                                info!("Failed to parse ACK offset from {}", op2);
+                            }
+                            // No response needed for ACK
+                            continue; // Continue to the next loop iteration
+                        }
                     }
                 }
-            }
 
-            let response = {
-                info!("Attempting to lock server for execute()");
-                let server_instance = server.lock().await;
-                info!("Server lock acquired for execute()");
-                server_instance.execute(command).await
-            };
+                let response = {
+                    info!("Attempting to lock server for execute()");
+                    let server_instance = server.lock().await;
+                    info!("Server lock acquired for execute()");
+                    server_instance.execute(command).await
+                };
 
-            info!("Command executed, response size: {}", response.len());
+                info!("Command executed, response size: {}", response.len());
 
-            if !response.is_empty() {
-                info!("Attempting to lock writer to send response");
-                let mut writer_guard = writer.lock().await;
-                info!("Writer lock acquired to send response");
-                writer_guard.write_all(&response).await?;
-                info!("Response sent to {}", socket_addr);
-            } else {
-                info!("Empty response, nothing sent to {}", socket_addr);
+                if !response.is_empty() {
+                    info!("Attempting to lock writer to send response");
+                    let mut writer_guard = writer.lock().await;
+                    info!("Writer lock acquired to send response");
+                    writer_guard.write_all(&response).await?;
+                    info!("Response sent to {}", socket_addr);
+                } else {
+                    info!("Empty response, nothing sent to {}", socket_addr);
+                }
             }
         }
     }
@@ -326,14 +402,20 @@ async fn main() -> std::io::Result<()> {
     spawn_cleanup_task(server.cache().clone());
     let server = Arc::new(Mutex::new(server));
 
-    let (acks_for_handler, notifier_for_handler) = {
+    let (acks_for_handler, notifier_for_handler, xadd_notifier_handler) = {
         let server_guard = server.lock().await;
         if let RedisServer::Master(master) = &*server_guard {
-            (Some(master.acks.clone()), Some(master.ack_notifier.clone()))
+            (
+                Some(master.acks.clone()),
+                Some(master.ack_notifier.clone()),
+                Some(master.xadd_notifier.clone()),
+            )
         } else {
-            (None, None)
+            (None, None, None)
         }
     };
+
+    let cache = server.lock().await.cache().clone();
 
     loop {
         match listener.accept().await {
@@ -343,10 +425,18 @@ async fn main() -> std::io::Result<()> {
                     Some(ref inner) => Some(Arc::clone(inner)),
                     None => None,
                 };
+
                 let notifier_for_handler_clone = match notifier_for_handler {
                     Some(ref inner) => Some(Arc::clone(inner)),
                     None => None,
                 };
+
+                let xadd_notifier_handler_clone = match xadd_notifier_handler {
+                    Some(ref inner) => Some(Arc::clone(inner)),
+                    None => None,
+                };
+
+                let cache_clone = cache.clone();
                 let socket_addr = match stream.peer_addr() {
                     Ok(addr) => addr,
                     Err(e) => {
@@ -367,8 +457,10 @@ async fn main() -> std::io::Result<()> {
                         socket_addr,
                         server_clone,
                         role,
+                        cache_clone,
                         acks_for_handler_clone,
                         notifier_for_handler_clone,
+                        xadd_notifier_handler_clone,
                     )
                     .await
                     {

@@ -171,6 +171,8 @@ pub enum Frame {
     Array(Vec<Frame>),
     /// Null (_)
     Null,
+    /// Null (_)
+    NullArray,
     /// Boolean (#)
     Boolean(bool),
     /// Double (,)
@@ -224,6 +226,7 @@ impl Frame {
                 result
             }
             Frame::Null => b"$-1\r\n".to_vec(),
+            Frame::NullArray => b"*-1\r\n".to_vec(),
             Frame::Boolean(b) => format!("#{}\r\n", if *b { "t" } else { "f" }).into_bytes(),
             Frame::Double(d) => format!(",{}\r\n", d).into_bytes(),
             Frame::BigNumber(n) => format!("({}\r\n", n).into_bytes(),
@@ -429,6 +432,7 @@ impl fmt::Display for Frame {
                 write!(f, "]")
             }
             Frame::Null => write!(f, "(null)"),
+            Frame::NullArray => write!(f, "(null_array)"),
             Frame::Boolean(b) => write!(f, "{}", b),
             Frame::Double(d) => write!(f, "{}", d),
             Frame::BigNumber(n) => write!(f, "{}", n),
