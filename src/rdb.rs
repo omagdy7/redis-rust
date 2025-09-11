@@ -12,7 +12,7 @@ use std::{
 use bytes::Bytes;
 use thiserror::Error;
 
-use crate::resp_commands::ExpiryOption;
+use crate::commands::ExpiryOption;
 
 /// Represents any possible value that a key can hold in Redis.
 ///
@@ -246,16 +246,18 @@ fn parse_length(bytes: &[u8]) -> Result<(usize, usize), RdbError> {
             consumed += 4;
 
             // pretty straight forward just ignore the first byte and interpret the next 4 bytes as a u32
-            let len = u32::from_be_bytes(
-                len_bytes.try_into().map_err(|_| RdbError::ArrayConversionError {
-                    message: "Failed to convert slice to array for u32".to_string()
-                })?
-            ) as usize;
+            let len = u32::from_be_bytes(len_bytes.try_into().map_err(|_| {
+                RdbError::ArrayConversionError {
+                    message: "Failed to convert slice to array for u32".to_string(),
+                }
+            })?) as usize;
             Ok((len, consumed))
         }
         0b11 => {
             // Special format, not a length
-            Err(RdbError::InvalidLength { length: first_byte[0] as usize })
+            Err(RdbError::InvalidLength {
+                length: first_byte[0] as usize,
+            })
         }
         _ => unreachable!(),
     }
@@ -285,7 +287,9 @@ fn parse_special_length(
                 i32::from_be_bytes([int_bytes[0], int_bytes[1], int_bytes[2], int_bytes[3]]) as i64;
             Ok((RedisValue::Integer(value), *bytes_consumed))
         }
-        _ => Err(RdbError::InvalidLength { length: special_type as usize }),
+        _ => Err(RdbError::InvalidLength {
+            length: special_type as usize,
+        }),
     }
 }
 
@@ -306,7 +310,10 @@ impl FromBytes for RedisValue {
                 .ok_or(ParseError::UnexpectedEof)?;
 
             let total_consumed = len_consumed + len;
-            Ok((RedisValue::String(Bytes::copy_from_slice(string_bytes)), total_consumed))
+            Ok((
+                RedisValue::String(Bytes::copy_from_slice(string_bytes)),
+                total_consumed,
+            ))
         }
     }
 }
@@ -334,11 +341,16 @@ impl FromBytes for RDBHeader {
 
         let version_str = std::str::from_utf8(version)?;
         if ("0001" <= version_str) && (version_str <= "0011") {
-            rdb_header.version = version.try_into().map_err(|_| RdbError::ArrayConversionError {
-                message: "Failed to convert version bytes to array".to_string()
-            })?;
+            rdb_header.version =
+                version
+                    .try_into()
+                    .map_err(|_| RdbError::ArrayConversionError {
+                        message: "Failed to convert version bytes to array".to_string(),
+                    })?;
         } else {
-            return Err(RdbError::InvalidVersion { version: version_str.to_string() });
+            return Err(RdbError::InvalidVersion {
+                version: version_str.to_string(),
+            });
         }
 
         Ok((rdb_header, 9))
@@ -498,13 +510,12 @@ impl FromBytes for RDBDatabase {
                     remaining = rest;
                     total_consumed += 8;
 
-                    let timestamp = u64::from_le_bytes(
-                        timestamp_bytes[0..8]
-                            .try_into()
-                            .map_err(|_| RdbError::ArrayConversionError {
-                                message: "Failed to convert timestamp bytes to array".to_string()
-                            })?,
-                    );
+                    let timestamp =
+                        u64::from_le_bytes(timestamp_bytes[0..8].try_into().map_err(|_| {
+                            RdbError::ArrayConversionError {
+                                message: "Failed to convert timestamp bytes to array".to_string(),
+                            }
+                        })?);
 
                     let (value_type_byte, rest) = remaining
                         .split_at_checked(1)
@@ -518,7 +529,11 @@ impl FromBytes for RDBDatabase {
                         unit: ExpiryUnit::Milliseconds,
                     });
 
-                    match ValueType::try_from(value_type_byte[0]).map_err(|_| RdbError::ValueTypeConversion { value: value_type_byte[0] })? {
+                    match ValueType::try_from(value_type_byte[0]).map_err(|_| {
+                        RdbError::ValueTypeConversion {
+                            value: value_type_byte[0],
+                        }
+                    })? {
                         ValueType::String => {
                             parse_db_key_value(
                                 &mut remaining,
@@ -539,13 +554,12 @@ impl FromBytes for RDBDatabase {
                     remaining = rest;
                     total_consumed += 4;
 
-                    let timestamp = u32::from_le_bytes(
-                        timestamp_bytes[0..4]
-                            .try_into()
-                            .map_err(|_| RdbError::ArrayConversionError {
-                                message: "Failed to convert timestamp bytes to array".to_string()
-                            })?,
-                    ) as u64;
+                    let timestamp =
+                        u32::from_le_bytes(timestamp_bytes[0..4].try_into().map_err(|_| {
+                            RdbError::ArrayConversionError {
+                                message: "Failed to convert timestamp bytes to array".to_string(),
+                            }
+                        })?) as u64;
 
                     let (value_type_byte, rest) = remaining
                         .split_at_checked(1)
@@ -559,7 +573,11 @@ impl FromBytes for RDBDatabase {
                         unit: ExpiryUnit::Seconds,
                     });
 
-                    match ValueType::try_from(value_type_byte[0]).map_err(|_| RdbError::ValueTypeConversion { value: value_type_byte[0] })? {
+                    match ValueType::try_from(value_type_byte[0]).map_err(|_| {
+                        RdbError::ValueTypeConversion {
+                            value: value_type_byte[0],
+                        }
+                    })? {
                         ValueType::String => {
                             parse_db_key_value(
                                 &mut remaining,
@@ -572,7 +590,9 @@ impl FromBytes for RDBDatabase {
                         _ => unreachable!(),
                     }
                 }
-                n @ 0..15 => match ValueType::try_from(n as u8).map_err(|_| RdbError::ValueTypeConversion { value: n as u8 })? {
+                n @ 0..15 => match ValueType::try_from(n as u8)
+                    .map_err(|_| RdbError::ValueTypeConversion { value: n as u8 })?
+                {
                     ValueType::String => {
                         parse_db_key_value(
                             &mut remaining,
@@ -662,11 +682,11 @@ impl FromBytes for RDBFile {
             let (checksum_bytes, _) = remaining
                 .split_at_checked(8)
                 .ok_or(RdbError::UnexpectedEof)?;
-            let checksum = u64::from_le_bytes(
-                checksum_bytes.try_into().map_err(|_| RdbError::ArrayConversionError {
-                    message: "Failed to convert checksum bytes to array".to_string()
-                })?
-            );
+            let checksum = u64::from_le_bytes(checksum_bytes.try_into().map_err(|_| {
+                RdbError::ArrayConversionError {
+                    message: "Failed to convert checksum bytes to array".to_string(),
+                }
+            })?);
             total_consumed += 8;
 
             let rdb_file = RDBFile {

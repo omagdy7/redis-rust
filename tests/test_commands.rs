@@ -1,13 +1,12 @@
-use std::collections::HashMap;
 use bytes::Bytes;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use std::thread;
 use tokio;
+use tokio::sync::Mutex;
 
 use codecrafters_redis::frame::Frame;
-use codecrafters_redis::server::SharedMut;
 use codecrafters_redis::shared_cache::{Cache, CacheEntry};
+use codecrafters_redis::types::SharedMut;
 
 // Test Helpers & Mocks
 /// Creates a new, empty shared cache for each test.
@@ -31,10 +30,10 @@ async fn get_from_cache(cache: &SharedMut<Cache>, key: &str) -> Option<CacheEntr
 
 /// Tests for the `RedisCommands::from(Frame)` parser logic.
 mod command_parser_tests {
-    use codecrafters_redis::resp_commands::ExpiryOption;
-    use codecrafters_redis::resp_commands::RedisCommand;
-    use codecrafters_redis::resp_commands::SetCondition;
-use codecrafters_redis::frame::Frame;
+    use codecrafters_redis::frame::Frame;
+    use codecrafters_redis::commands::ExpiryOption;
+    use codecrafters_redis::commands::RedisCommand;
+    use codecrafters_redis::commands::SetCondition;
 
     use super::*;
 
@@ -145,8 +144,8 @@ use codecrafters_redis::frame::Frame;
 
 /// Tests for the command execution logic in `RedisCommands::execute`.
 mod command_execution_tests {
-    use codecrafters_redis::resp_commands::RedisCommand;
-    use codecrafters_redis::server::{RedisServer, BoxedAsyncWrite, CommandHandler};
+    use codecrafters_redis::commands::RedisCommand;
+    use codecrafters_redis::server::RedisServer;
     use std::time::Duration;
 
     use super::*;
@@ -154,13 +153,10 @@ mod command_execution_tests {
     /// Helper to parse and execute a command against a cache.
     async fn run_command(cache: &SharedMut<Cache>, args: &[&str]) -> Vec<u8> {
         let command = RedisCommand::from(build_command_from_str_slice(args));
-        let mut server = RedisServer::<BoxedAsyncWrite>::new_master();
+        let mut server = RedisServer::new_master();
         server.set_cache(cache);
 
-        match server {
-            RedisServer::Master(master) => master.execute(command).await,
-            RedisServer::Slave(_) => panic!("Test uses master"),
-        }
+        server.execute(command).await
     }
 
     #[tokio::test]
@@ -200,25 +196,46 @@ mod command_execution_tests {
     async fn test_execute_set_nx() {
         let cache = new_cache();
         // Should succeed when key doesn't exist
-        assert_eq!(run_command(&cache, &["SET", "k", "v1", "NX"]).await, b"+OK\r\n");
-        assert_eq!(get_from_cache(&cache, "k").await.unwrap().value, Frame::BulkString("v1".into()));
+        assert_eq!(
+            run_command(&cache, &["SET", "k", "v1", "NX"]).await,
+            b"+OK\r\n"
+        );
+        assert_eq!(
+            get_from_cache(&cache, "k").await.unwrap().value,
+            Frame::BulkString("v1".into())
+        );
 
         // Should fail when key exists
-        assert_eq!(run_command(&cache, &["SET", "k", "v2", "NX"]).await, b"$-1\r\n");
-        assert_eq!(get_from_cache(&cache, "k").await.unwrap().value, Frame::BulkString("v1".into())); // Value is unchanged
+        assert_eq!(
+            run_command(&cache, &["SET", "k", "v2", "NX"]).await,
+            b"$-1\r\n"
+        );
+        assert_eq!(
+            get_from_cache(&cache, "k").await.unwrap().value,
+            Frame::BulkString("v1".into())
+        ); // Value is unchanged
     }
 
     #[tokio::test]
     async fn test_execute_set_xx() {
         let cache = new_cache();
         // Should fail when key doesn't exist
-        assert_eq!(run_command(&cache, &["SET", "k", "v1", "XX"]).await, b"$-1\r\n");
+        assert_eq!(
+            run_command(&cache, &["SET", "k", "v1", "XX"]).await,
+            b"$-1\r\n"
+        );
         assert!(get_from_cache(&cache, "k").await.is_none());
 
         // Pre-populate and should succeed
         run_command(&cache, &["SET", "k", "v1"]).await;
-        assert_eq!(run_command(&cache, &["SET", "k", "v2", "XX"]).await, b"+OK\r\n");
-        assert_eq!(get_from_cache(&cache, "k").await.unwrap().value, Frame::BulkString("v2".into()));
+        assert_eq!(
+            run_command(&cache, &["SET", "k", "v2", "XX"]).await,
+            b"+OK\r\n"
+        );
+        assert_eq!(
+            get_from_cache(&cache, "k").await.unwrap().value,
+            Frame::BulkString("v2".into())
+        );
     }
 
     #[tokio::test]
@@ -230,7 +247,10 @@ mod command_execution_tests {
         // a Simple String `+old\r\n`. The test correctly expects a Bulk String.
         let result = run_command(&cache, &["SET", "mykey", "new", "GET"]).await;
         assert_eq!(result, b"$3\r\nold\r\n");
-        assert_eq!(get_from_cache(&cache, "mykey").await.unwrap().value, Frame::BulkString("new".into()));
+        assert_eq!(
+            get_from_cache(&cache, "mykey").await.unwrap().value,
+            Frame::BulkString("new".into())
+        );
     }
 
     #[tokio::test]
@@ -275,7 +295,7 @@ mod command_execution_tests {
 mod set_command_tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use codecrafters_redis::resp_commands::{ExpiryOption, SetCommand};
+    use codecrafters_redis::commands::{ExpiryOption, SetCommand};
 
     #[test]
     fn test_calculate_expiry_seconds() {

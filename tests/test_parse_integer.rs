@@ -1,5 +1,5 @@
-use codecrafters_redis::resp_parser::*;
 use codecrafters_redis::frame::Frame;
+use codecrafters_redis::parser::*;
 
 #[test]
 fn test_valid_integers() {
@@ -7,7 +7,10 @@ fn test_valid_integers() {
     assert_eq!(parse_integers(b":0\r\n").unwrap().0, Frame::Integer(0));
     assert_eq!(parse_integers(b":1\r\n").unwrap().0, Frame::Integer(1));
     assert_eq!(parse_integers(b":42\r\n").unwrap().0, Frame::Integer(42));
-    assert_eq!(parse_integers(b":1000\r\n").unwrap().0, Frame::Integer(1000));
+    assert_eq!(
+        parse_integers(b":1000\r\n").unwrap().0,
+        Frame::Integer(1000)
+    );
 
     assert_eq!(parse_integers(b":+42\r\n").unwrap().0, Frame::Integer(42));
 
@@ -22,10 +25,16 @@ fn test_valid_integers() {
     ); // i64::MAX
 
     // Edge cases
-    assert_eq!(parse_integers(b":123456789\r\n").unwrap().0, Frame::Integer(123456789));
+    assert_eq!(
+        parse_integers(b":123456789\r\n").unwrap().0,
+        Frame::Integer(123456789)
+    );
 
     // Numbers with leading zeros (should still parse correctly)
-    assert_eq!(parse_integers(b":0000042\r\n").unwrap().0, Frame::Integer(42));
+    assert_eq!(
+        parse_integers(b":0000042\r\n").unwrap().0,
+        Frame::Integer(42)
+    );
     assert_eq!(parse_integers(b":00000\r\n").unwrap().0, Frame::Integer(0));
 }
 

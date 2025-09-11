@@ -1,5 +1,5 @@
-use codecrafters_redis::resp_parser::*;
 use codecrafters_redis::frame::Frame;
+use codecrafters_redis::parser::*;
 
 #[test]
 fn test_valid_simple_errors() {
@@ -18,7 +18,10 @@ fn test_valid_simple_errors() {
     );
 
     // Empty error string
-    assert_eq!(parse_simple_errors(b"-\r\n").unwrap().0, Frame::SimpleError("".to_string()));
+    assert_eq!(
+        parse_simple_errors(b"-\r\n").unwrap().0,
+        Frame::SimpleError("".to_string())
+    );
 
     // Error with spaces and special characters (but no \r or \n)
     assert_eq!(
@@ -57,7 +60,9 @@ fn test_valid_simple_errors() {
         )
         .unwrap()
         .0,
-        Frame::SimpleError("WRONGTYPE Operation against a key holding the wrong kind of value".to_string())
+        Frame::SimpleError(
+            "WRONGTYPE Operation against a key holding the wrong kind of value".to_string()
+        )
     );
 }
 

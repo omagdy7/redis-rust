@@ -1,16 +1,13 @@
-use codecrafters_redis::frame::Frame;
-use codecrafters_redis::resp_parser::*;
 use bytes::Bytes;
+use codecrafters_redis::frame::Frame;
+use codecrafters_redis::parser::*;
 use std::collections::HashMap;
 
 #[test]
 fn test_valid_empty_map() {
     // Empty map: %0\r\n
     let expected_map = HashMap::new();
-    assert_eq!(
-        parse_maps(b"%0\r\n").unwrap().0,
-        Frame::Map(expected_map)
-    );
+    assert_eq!(parse_maps(b"%0\r\n").unwrap().0, Frame::Map(expected_map));
 }
 
 #[test]
@@ -256,10 +253,7 @@ fn test_invalid_maps() {
 fn test_map_remaining_bytes() {
     // Test with remaining data
     let mut expected_map = HashMap::new();
-    expected_map.insert(
-        "key".to_string(),
-        Frame::SimpleString("value".to_string()),
-    );
+    expected_map.insert("key".to_string(), Frame::SimpleString("value".to_string()));
 
     let (value, remaining) = parse_maps(b"%1\r\n+key\r\n+value\r\n+OK\r\n").unwrap();
     assert_eq!(value, Frame::Map(expected_map));
@@ -393,10 +387,7 @@ fn test_binary_data_in_bulk_strings() {
 fn test_unicode_keys() {
     // Map with Unicode keys
     let mut expected_map = HashMap::new();
-    expected_map.insert(
-        "éáñ".to_string(),
-        Frame::SimpleString("value1".to_string()),
-    );
+    expected_map.insert("éáñ".to_string(), Frame::SimpleString("value1".to_string()));
     expected_map.insert(
         "中文".to_string(),
         Frame::SimpleString("value2".to_string()),

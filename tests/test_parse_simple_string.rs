@@ -1,18 +1,27 @@
-use codecrafters_redis::resp_parser::*;
 use codecrafters_redis::frame::Frame;
+use codecrafters_redis::parser::*;
 
 #[test]
 fn test_valid_simple_strings() {
     // Basic valid cases
-    assert_eq!(parse_simple_strings(b"+OK\r\n").unwrap().0, Frame::SimpleString("OK".to_string()));
-    assert_eq!(parse_simple_strings(b"+PONG\r\n").unwrap().0, Frame::SimpleString("PONG".to_string()));
+    assert_eq!(
+        parse_simple_strings(b"+OK\r\n").unwrap().0,
+        Frame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        parse_simple_strings(b"+PONG\r\n").unwrap().0,
+        Frame::SimpleString("PONG".to_string())
+    );
     assert_eq!(
         parse_simple_strings(b"+Hello World\r\n").unwrap().0,
         Frame::SimpleString("Hello World".to_string())
     );
 
     // Empty string
-    assert_eq!(parse_simple_strings(b"+\r\n").unwrap().0, Frame::SimpleString("".to_string()));
+    assert_eq!(
+        parse_simple_strings(b"+\r\n").unwrap().0,
+        Frame::SimpleString("".to_string())
+    );
 
     // String with spaces and special characters (but no \r or \n)
     assert_eq!(
@@ -122,7 +131,10 @@ fn test_empty_input() {
 #[test]
 fn test_with_trailing_data() {
     // RESP simple string with extra data after CRLF (should be ignored)
-    assert_eq!(parse_simple_strings(b"+OK\r\nextra_data").unwrap().0, Frame::SimpleString("OK".to_string()));
+    assert_eq!(
+        parse_simple_strings(b"+OK\r\nextra_data").unwrap().0,
+        Frame::SimpleString("OK".to_string())
+    );
     assert_eq!(
         parse_simple_strings(b"+PONG\r\n+another_string\r\n")
             .unwrap()
@@ -134,9 +146,18 @@ fn test_with_trailing_data() {
 #[test]
 fn test_real_world_redis_responses() {
     // Common Redis simple string responses
-    assert_eq!(parse_simple_strings(b"+OK\r\n").unwrap().0, Frame::SimpleString("OK".to_string()));
-    assert_eq!(parse_simple_strings(b"+PONG\r\n").unwrap().0, Frame::SimpleString("PONG".to_string()));
-    assert_eq!(parse_simple_strings(b"+QUEUED\r\n").unwrap().0, Frame::SimpleString("QUEUED".to_string()));
+    assert_eq!(
+        parse_simple_strings(b"+OK\r\n").unwrap().0,
+        Frame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        parse_simple_strings(b"+PONG\r\n").unwrap().0,
+        Frame::SimpleString("PONG".to_string())
+    );
+    assert_eq!(
+        parse_simple_strings(b"+QUEUED\r\n").unwrap().0,
+        Frame::SimpleString("QUEUED".to_string())
+    );
 
     // Redis status responses
     assert_eq!(
@@ -156,20 +177,32 @@ fn test_real_world_redis_responses() {
 #[test]
 fn test_edge_cases() {
     // Just the prefix and CRLF
-    assert_eq!(parse_simple_strings(b"+\r\n").unwrap().0, Frame::SimpleString("".to_string()));
+    assert_eq!(
+        parse_simple_strings(b"+\r\n").unwrap().0,
+        Frame::SimpleString("".to_string())
+    );
 
     // Long string
     let long_string = "a".repeat(1000);
     let mut input = b"+".to_vec();
     input.extend_from_slice(long_string.as_bytes());
     input.extend_from_slice(b"\r\n");
-    assert_eq!(parse_simple_strings(&input).unwrap().0, Frame::SimpleString(long_string));
+    assert_eq!(
+        parse_simple_strings(&input).unwrap().0,
+        Frame::SimpleString(long_string)
+    );
 
     // String with only spaces
-    assert_eq!(parse_simple_strings(b"+   \r\n").unwrap().0, Frame::SimpleString("   ".to_string()));
+    assert_eq!(
+        parse_simple_strings(b"+   \r\n").unwrap().0,
+        Frame::SimpleString("   ".to_string())
+    );
 
     // String with tabs and other whitespace
-    assert_eq!(parse_simple_strings(b"+\t  \t\r\n").unwrap().0, Frame::SimpleString("\t  \t".to_string()));
+    assert_eq!(
+        parse_simple_strings(b"+\t  \t\r\n").unwrap().0,
+        Frame::SimpleString("\t  \t".to_string())
+    );
 }
 
 #[test]

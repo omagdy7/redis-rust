@@ -1,4 +1,5 @@
-use crate::frame::{Frame, XaddStreamId, XrangeStreamdId, XReadStreamId};
+use crate::frame::Frame;
+use crate::stream::{XReadStreamId, XaddStreamId, XrangeStreamdId};
 use std::{
     collections::HashMap,
     time::{SystemTime, UNIX_EPOCH},
@@ -114,6 +115,7 @@ fn extract_string(resp: &Frame) -> Option<String> {
     }
 }
 
+// TODO: Refactor this to use enum struct variants with more descreptive names
 #[derive(Debug)]
 pub enum RedisCommand {
     Ping,
@@ -143,6 +145,135 @@ pub enum RedisCommand {
         stream_ids: Vec<XReadStreamId>,
     },
     Invalid,
+}
+
+impl RedisCommand {
+    fn parse_set_command(mut args: impl Iterator<Item = String>) -> Self {
+        let Some(key) = args.next() else {
+            return Self::Invalid;
+        };
+        let Some(value) = args.next() else {
+            return Self::Invalid;
+        };
+
+        let options: Vec<String> = args.collect();
+
+        if options.is_empty() {
+            Self::Set(SetCommand::new(key, value))
+        } else {
+            let parser = SetOptionParser::new(key, value);
+            parser
+                .parse_options(&options)
+                .map(Self::Set)
+                .unwrap_or(Self::Invalid)
+        }
+    }
+
+    fn parse_xadd_command(mut args: impl Iterator<Item = String>) -> Self {
+        let Some(key) = args.next() else {
+            return Self::Invalid;
+        };
+        let Some(stream_id) = args.next() else {
+            return Self::Invalid;
+        };
+
+        let Ok(parsed_id) = stream_id.parse::<XaddStreamId>() else {
+            return Self::Invalid;
+        };
+
+        let mut fields = HashMap::new();
+        while let (Some(field_key), Some(value)) = (args.next(), args.next()) {
+            fields.insert(field_key, value);
+        }
+
+        Self::Xadd {
+            key,
+            parsed_id,
+            fields,
+        }
+    }
+
+    fn parse_xrange_command(mut args: impl Iterator<Item = String>) -> Self {
+        let Some(key) = args.next() else {
+            return Self::Invalid;
+        };
+        let Some(start) = args.next() else {
+            return Self::Invalid;
+        };
+        let Some(end) = args.next() else {
+            return Self::Invalid;
+        };
+
+        let Ok(start_id) = start.parse::<XrangeStreamdId>() else {
+            return Self::Invalid;
+        };
+        let Ok(end_id) = end.parse::<XrangeStreamdId>() else {
+            return Self::Invalid;
+        };
+
+        Self::XRange {
+            key,
+            start: start_id,
+            end: end_id,
+        }
+    }
+
+    fn parse_xread_command(args: impl Iterator<Item = String>) -> Self {
+        let mut args = args.peekable();
+
+        // Handle optional BLOCK argument
+        let block_param = if args.peek().map(|s| s.as_str()) == Some("block") {
+            args.next(); // consume "block"
+            match args.next().and_then(|s| s.parse::<u64>().ok()) {
+                Some(ms) => Some(ms),
+                None => return Self::Invalid,
+            }
+        } else {
+            None
+        };
+
+        // Consume the 'streams' literal
+        if args.next().is_none() {
+            return Self::Invalid;
+        }
+
+        let mut args: Vec<String> = args.collect();
+        let i = args.partition_point(|element| element.parse::<XReadStreamId>().is_err());
+
+        let stream_ids: Result<Vec<_>, _> = args
+            .split_off(i)
+            .iter()
+            .map(|s_id| s_id.parse::<XReadStreamId>())
+            .collect();
+
+        let Ok(stream_ids) = stream_ids else {
+            return Self::Invalid;
+        };
+
+        Self::XRead {
+            block_param,
+            keys: args,
+            stream_ids,
+        }
+    }
+
+    fn parse_config_command(mut args: impl Iterator<Item = String>) -> Self {
+        match (args.next(), args.next()) {
+            (Some(sub_command), Some(key)) if sub_command.eq_ignore_ascii_case("GET") => {
+                Self::ConfigGet(key)
+            }
+            _ => Self::Invalid,
+        }
+    }
+
+    fn parse_info_command(mut args: impl Iterator<Item = String>) -> Self {
+        match args.next() {
+            Some(sub_command) if sub_command.eq_ignore_ascii_case("REPLICATION") => {
+                Self::Info(sub_command)
+            }
+            _ => Self::Invalid,
+        }
+    }
 }
 
 // Parser for SET command options
@@ -247,7 +378,6 @@ impl SetOptionParser {
 
 impl From<Frame> for RedisCommand {
     fn from(value: Frame) -> Self {
-        // Any command is a Frame::Array so we make sure it is
         let Frame::Array(command) = value else {
             return Self::Invalid;
         };
@@ -274,157 +404,32 @@ impl From<Frame> for RedisCommand {
                 (Some(key), None) => Self::Get(key),
                 _ => Self::Invalid,
             },
-            "SET" => {
-                let Some(key) = args.next() else {
-                    return Self::Invalid;
-                };
-                let Some(value) = args.next() else {
-                    return Self::Invalid;
-                };
-
-                let options: Vec<String> = args.collect();
-
-                if options.is_empty() {
-                    Self::Set(SetCommand::new(key, value))
-                } else {
-                    let parser = SetOptionParser::new(key, value);
-                    match parser.parse_options(&options) {
-                        Ok(set_command) => Self::Set(set_command),
-                        Err(_) => Self::Invalid,
-                    }
-                }
-            }
-            "XADD" => {
-                let Some(key) = args.next() else {
-                    return Self::Invalid;
-                };
-                let Some(stream_id) = args.next() else {
-                    return Self::Invalid;
-                };
-
-                let parsed_id: XaddStreamId = stream_id.parse().unwrap();
-                let mut fields: HashMap<String, String> = HashMap::new();
-                while let (Some(field_key), Some(value)) = (args.next(), args.next()) {
-                    fields.insert(field_key, value);
-                }
-                Self::Xadd {
-                    key: key,
-                    parsed_id,
-                    fields,
-                }
-            }
-            "XRANGE" => {
-                let Some(key) = args.next() else {
-                    return Self::Invalid;
-                };
-                let Some(start) = args.next() else {
-                    return Self::Invalid;
-                };
-                let Some(end) = args.next() else {
-                    return Self::Invalid;
-                };
-
-                let start_id: XrangeStreamdId = start.parse().unwrap();
-                let end_id: XrangeStreamdId = end.parse().unwrap();
-
-                Self::XRange {
-                    key: key,
-                    start: start_id,
-                    end: end_id,
-                }
-            }
-            "XREAD" => {
-                let mut args = args.peekable();
-
-                // Handle optional BLOCK argument
-                let block_param = if args.peek().map(|s| s.as_str()) == Some("block") {
-                    args.next(); // consume "block"
-                    match args.next().and_then(|s| s.parse::<u64>().ok()) {
-                        Some(ms) => Some(ms),
-                        None => return Self::Invalid,
-                    }
-                } else {
-                    None
-                };
-
-                // to consume the 'streams' literal
-                let Some(_) = args.next() else {
-                    return Self::Invalid;
-                };
-
-                let mut args: Vec<String> = args.collect();
-
-                let i = args.partition_point(|element| element.parse::<XReadStreamId>().is_err());
-                let stream_ids: Vec<XReadStreamId> = args
-                    .split_off(i)
-                    .iter()
-                    .map(|s_id| s_id.parse().unwrap())
-                    .collect();
-
-                Self::XRead {
-                    block_param,
-                    keys: args,
-                    stream_ids,
-                }
-            }
             "TYPE" => match args.next() {
                 Some(key) => Self::Type(key),
+                None => Self::Invalid,
+            },
+            "KEYS" => match args.next() {
+                Some(query) => Self::Keys(query),
+                None => Self::Invalid,
+            },
+            "REPLCONF" => match (args.next(), args.next()) {
+                (Some(op1), Some(op2)) => Self::ReplConf((op1, op2)),
                 _ => Self::Invalid,
             },
-            "KEYS" => {
-                let Some(query) = args.next() else {
-                    return Self::Invalid;
-                };
-                Self::Keys(query)
-            }
-            "CONFIG" => {
-                let Some(sub_command) = args.next() else {
-                    return Self::Invalid;
-                };
-                let Some(key) = args.next() else {
-                    return Self::Invalid;
-                };
-                if &sub_command.to_uppercase() == &"GET" {
-                    return Self::ConfigGet(key);
-                }
-                Self::Invalid
-            }
-            "INFO" => {
-                let Some(sub_command) = args.next() else {
-                    return Self::Invalid;
-                };
-                if &sub_command.to_uppercase() == &"REPLICATION" {
-                    return Self::Info(sub_command);
-                }
-                Self::Invalid
-            }
-            "REPLCONF" => {
-                let Some(op1) = args.next() else {
-                    return Self::Invalid;
-                };
-                let Some(op2) = args.next() else {
-                    return Self::Invalid;
-                };
-                Self::ReplConf((op1, op2))
-            }
-            "WAIT" => {
-                let Some(op1) = args.next() else {
-                    return Self::Invalid;
-                };
-                let Some(op2) = args.next() else {
-                    return Self::Invalid;
-                };
-                Self::Wait((op1, op2))
-            }
-            "PSYNC" => {
-                let Some(repl_id) = args.next() else {
-                    return Self::Invalid;
-                };
-                let Some(repl_offset) = args.next() else {
-                    return Self::Invalid;
-                };
-                Self::Psync((repl_id, repl_offset))
-            }
+            "WAIT" => match (args.next(), args.next()) {
+                (Some(op1), Some(op2)) => Self::Wait((op1, op2)),
+                _ => Self::Invalid,
+            },
+            "PSYNC" => match (args.next(), args.next()) {
+                (Some(repl_id), Some(repl_offset)) => Self::Psync((repl_id, repl_offset)),
+                _ => Self::Invalid,
+            },
+            "SET" => Self::parse_set_command(args),
+            "XADD" => Self::parse_xadd_command(args),
+            "XRANGE" => Self::parse_xrange_command(args),
+            "XREAD" => Self::parse_xread_command(args),
+            "CONFIG" => Self::parse_config_command(args),
+            "INFO" => Self::parse_info_command(args),
             _ => Self::Invalid,
         }
     }

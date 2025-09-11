@@ -1,19 +1,28 @@
-use codecrafters_redis::resp_parser::*;
-use codecrafters_redis::frame::Frame;
 use bytes::Bytes;
+use codecrafters_redis::frame::Frame;
+use codecrafters_redis::parser::*;
 
 #[test]
 fn test_valid_bulk_strings() {
     // basic valid cases
-    assert_eq!(parse_bulk_strings(b"$2\r\nok\r\n").unwrap().0, Frame::BulkString(Bytes::from("ok")));
-    assert_eq!(parse_bulk_strings(b"$4\r\npong\r\n").unwrap().0, Frame::BulkString(Bytes::from("pong")));
+    assert_eq!(
+        parse_bulk_strings(b"$2\r\nok\r\n").unwrap().0,
+        Frame::BulkString(Bytes::from("ok"))
+    );
+    assert_eq!(
+        parse_bulk_strings(b"$4\r\npong\r\n").unwrap().0,
+        Frame::BulkString(Bytes::from("pong"))
+    );
     assert_eq!(
         parse_bulk_strings(b"$11\r\nhello world\r\n").unwrap().0,
         Frame::BulkString(Bytes::from("hello world"))
     );
 
     // empty string
-    assert_eq!(parse_bulk_strings(b"$0\r\n\r\n").unwrap().0, Frame::BulkString(Bytes::from("")));
+    assert_eq!(
+        parse_bulk_strings(b"$0\r\n\r\n").unwrap().0,
+        Frame::BulkString(Bytes::from(""))
+    );
 
     // string with special characters (including \r and \n - allowed in bulk strings)
     assert_eq!(
@@ -38,7 +47,10 @@ fn test_valid_bulk_strings() {
     );
 
     // string with only whitespace
-    assert_eq!(parse_bulk_strings(b"$3\r\n   \r\n").unwrap().0, Frame::BulkString(Bytes::from("   ")));
+    assert_eq!(
+        parse_bulk_strings(b"$3\r\n   \r\n").unwrap().0,
+        Frame::BulkString(Bytes::from("   "))
+    );
 
     // string with tabs and newlines
     assert_eq!(
@@ -194,10 +206,16 @@ fn test_bulk_string_edge_cases() {
     );
 
     // String with only \r\n
-    assert_eq!(parse_bulk_strings(b"$2\r\n\r\n\r\n").unwrap().0, Frame::BulkString(Bytes::from("\r\n")));
+    assert_eq!(
+        parse_bulk_strings(b"$2\r\n\r\n\r\n").unwrap().0,
+        Frame::BulkString(Bytes::from("\r\n"))
+    );
 
     // String that starts with numbers
-    assert_eq!(parse_bulk_strings(b"$5\r\n12345\r\n").unwrap().0, Frame::BulkString(Bytes::from("12345")));
+    assert_eq!(
+        parse_bulk_strings(b"$5\r\n12345\r\n").unwrap().0,
+        Frame::BulkString(Bytes::from("12345"))
+    );
 
     // String with control characters
     assert_eq!(
@@ -210,5 +228,8 @@ fn test_bulk_string_edge_cases() {
     // Maximum length value (within reason)
     let content = "a".repeat(65535);
     let bulk = format!("$65535\r\n{}\r\n", content);
-    assert_eq!(parse_bulk_strings(bulk.as_bytes()).unwrap().0, Frame::BulkString(Bytes::from(content)));
+    assert_eq!(
+        parse_bulk_strings(bulk.as_bytes()).unwrap().0,
+        Frame::BulkString(Bytes::from(content))
+    );
 }

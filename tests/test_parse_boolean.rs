@@ -1,5 +1,5 @@
-use codecrafters_redis::resp_parser::*;
 use codecrafters_redis::frame::Frame;
+use codecrafters_redis::parser::*;
 
 #[test]
 fn test_valid_booleans() {
@@ -7,10 +7,7 @@ fn test_valid_booleans() {
     assert_eq!(parse_boolean(b"#t\r\n").unwrap().0, Frame::Boolean(true));
 
     // Basic false value
-    assert_eq!(
-        parse_boolean(b"#f\r\n").unwrap().0,
-        Frame::Boolean(false)
-    );
+    assert_eq!(parse_boolean(b"#f\r\n").unwrap().0, Frame::Boolean(false));
 }
 
 #[test]

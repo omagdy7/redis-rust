@@ -559,7 +559,10 @@ fn test_binary_string_data() {
     assert_eq!(database.hash_table.len(), 2);
 
     // Verify binary data preserved
-    let binary_entry = database.hash_table.get(&Bytes::copy_from_slice(binary_key)).unwrap();
+    let binary_entry = database
+        .hash_table
+        .get(&Bytes::copy_from_slice(binary_key))
+        .unwrap();
     if let RedisValue::String(value) = &binary_entry.value {
         assert_eq!(value.as_ref(), binary_value);
     } else {
