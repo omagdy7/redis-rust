@@ -1,4 +1,4 @@
-use crate::frame::{Frame, StreamId, XaddStreamId, XrangeStreamdId};
+use crate::frame::{Frame, XaddStreamId, XrangeStreamdId, XReadStreamId};
 use std::{
     collections::HashMap,
     time::{SystemTime, UNIX_EPOCH},
@@ -140,7 +140,7 @@ pub enum RedisCommand {
     XRead {
         block_param: Option<u64>, // time in ms
         keys: Vec<String>,
-        stream_ids: Vec<StreamId>,
+        stream_ids: Vec<XReadStreamId>,
     },
     Invalid,
 }
@@ -354,8 +354,8 @@ impl From<Frame> for RedisCommand {
 
                 let mut args: Vec<String> = args.collect();
 
-                let i = args.partition_point(|element| element.parse::<StreamId>().is_err());
-                let stream_ids: Vec<StreamId> = args
+                let i = args.partition_point(|element| element.parse::<XReadStreamId>().is_err());
+                let stream_ids: Vec<XReadStreamId> = args
                     .split_off(i)
                     .iter()
                     .map(|s_id| s_id.parse().unwrap())

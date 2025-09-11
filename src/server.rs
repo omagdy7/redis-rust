@@ -1,5 +1,5 @@
 use crate::frame::{Frame, XrangeStreamdId};
-use crate::frame::{StreamEntry, StreamId, XaddStreamId};
+use crate::frame::{StreamEntry, StreamId, XaddStreamId, XReadStreamId};
 use crate::rdb::{ExpiryUnit, FromBytes, RDBFile, RedisValue};
 use crate::resp_commands::{ExpiryOption, RedisCommand, SetCondition};
 use crate::resp_parser::parse;
@@ -1172,6 +1172,34 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
             } => {
                 info!("Received XRead command for keys: {:?}", keys);
 
+                info!("Attempting to lock cache for XREAD");
+                let cache = self.cache.lock().await;
+                info!("Cache lock acquired for XREAD");
+
+                // Calculate filter_ids before waiting
+                let mut filter_ids = Vec::new();
+                for (key, stream_id) in keys.iter().zip(stream_ids.iter()) {
+                    if let Some(entry) = cache.get(key) {
+                        if let Frame::Stream(ref vec) = entry.value {
+                            let filter_id = match stream_id {
+                                XReadStreamId::Literal(id) => *id,
+                                XReadStreamId::Latest => {
+                                    // Find the maximum ID in the stream
+                                    vec.iter().max_by_key(|e| e.id).map(|e| e.id).unwrap_or(StreamId { ms_time: 0, seq: 0 })
+                                }
+                            };
+                            filter_ids.push(filter_id);
+                        } else {
+                            filter_ids.push(StreamId { ms_time: 0, seq: 0 });
+                        }
+                    } else {
+                        filter_ids.push(StreamId { ms_time: 0, seq: 0 });
+                    }
+                }
+
+                // Drop the lock before waiting
+                drop(cache);
+
                 if let Some(timeout_ms) = block_param {
                     if timeout_ms == 0 {
                         info!("Blocking XREAD indefinitely until we recieve a notification");
@@ -1196,14 +1224,13 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                     }
                 }
 
-                info!("Attempting to lock cache for XREAD");
+                // Re-lock cache after waiting
                 let cache = self.cache.lock().await;
-                info!("Cache lock acquired for XREAD");
 
                 let mut stream_responses = Vec::new();
 
                 // Iterate through each key-stream_id pair
-                for (key, stream_id) in keys.iter().zip(stream_ids.iter()) {
+                for ((key, _stream_id), filter_id) in keys.iter().zip(stream_ids.iter()).zip(filter_ids.iter()) {
                     if let Some(entry) = cache.get(key) {
                         if let Frame::Stream(ref vec) = entry.value {
                             info!(
@@ -1212,7 +1239,7 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                             );
                             let filtered_streams = vec
                                 .iter()
-                                .filter(|stream| stream.id > *stream_id)
+                                .filter(|stream| stream.id > *filter_id)
                                 .collect::<Vec<&StreamEntry>>();
 
                             // Only include this stream in response if it has entries

@@ -54,6 +54,12 @@ pub enum XrangeStreamdId {
     AutoEnd,
 }
 
+#[derive(Debug, Clone)]
+pub enum XReadStreamId {
+    Literal(StreamId),
+    Latest,
+}
+
 impl FromStr for StreamId {
     type Err = ParseStreamIdError;
 
@@ -135,6 +141,28 @@ impl FromStr for XrangeStreamdId {
             .parse::<u64>()
             .map_err(|_| ParseStreamIdError::InvalidNumber)?;
         Ok(XrangeStreamdId::Literal(StreamId { ms_time, seq }))
+    }
+}
+
+impl FromStr for XReadStreamId {
+    type Err = ParseStreamIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "$" {
+            return Ok(XReadStreamId::Latest);
+        }
+
+        let mut parts = s.splitn(2, '-');
+        let ms_part = parts.next().ok_or(ParseStreamIdError::MissingPart)?;
+        let seq_part = parts.next().ok_or(ParseStreamIdError::MissingPart)?;
+
+        let ms_time = ms_part
+            .parse::<u64>()
+            .map_err(|_| ParseStreamIdError::InvalidNumber)?;
+        let seq = seq_part
+            .parse::<u64>()
+            .map_err(|_| ParseStreamIdError::InvalidNumber)?;
+        Ok(XReadStreamId::Literal(StreamId { ms_time, seq }))
     }
 }
 
