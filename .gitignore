@@ -10,5 +10,4 @@ target/
 *.pdb
 
 .env
-ctx.file
-GEMINI.md
+AGENTS.md
