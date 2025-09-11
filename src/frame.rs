@@ -40,10 +40,18 @@ pub enum ParseStreamIdError {
 }
 
 #[derive(Debug, Clone)]
-pub enum ParsedStreamId {
+pub enum XaddStreamId {
     Literal(StreamId),
     AutoSequence { ms_time: u64 },
     Auto,
+}
+
+#[derive(Debug, Clone)]
+pub enum XrangeStreamdId {
+    Literal(StreamId),
+    AutoSequence { ms_time: u64 },
+    AutoStart,
+    AutoEnd,
 }
 
 impl FromStr for StreamId {
@@ -65,12 +73,12 @@ impl FromStr for StreamId {
     }
 }
 
-impl FromStr for ParsedStreamId {
+impl FromStr for XaddStreamId {
     type Err = ParseStreamIdError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s == "*" {
-            return Ok(ParsedStreamId::Auto);
+            return Ok(XaddStreamId::Auto);
         }
 
         let mut parts = s.splitn(2, '-');
@@ -79,16 +87,54 @@ impl FromStr for ParsedStreamId {
 
         match (ms_part, seq_part) {
             (ms_str, "*") => {
-                let ms_time = ms_str.parse::<u64>().map_err(|_| ParseStreamIdError::InvalidNumber)?;
-                Ok(ParsedStreamId::AutoSequence { ms_time })
+                let ms_time = ms_str
+                    .parse::<u64>()
+                    .map_err(|_| ParseStreamIdError::InvalidNumber)?;
+                Ok(XaddStreamId::AutoSequence { ms_time })
             }
             (ms_str, seq_str) if seq_str != "*" => {
-                let ms_time = ms_str.parse::<u64>().map_err(|_| ParseStreamIdError::InvalidNumber)?;
-                let seq = seq_str.parse::<u64>().map_err(|_| ParseStreamIdError::InvalidNumber)?;
-                Ok(ParsedStreamId::Literal(StreamId { ms_time, seq }))
+                let ms_time = ms_str
+                    .parse::<u64>()
+                    .map_err(|_| ParseStreamIdError::InvalidNumber)?;
+                let seq = seq_str
+                    .parse::<u64>()
+                    .map_err(|_| ParseStreamIdError::InvalidNumber)?;
+                Ok(XaddStreamId::Literal(StreamId { ms_time, seq }))
             }
             _ => Err(ParseStreamIdError::InvalidAuto),
         }
+    }
+}
+
+impl FromStr for XrangeStreamdId {
+    type Err = ParseStreamIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "-" {
+            return Ok(XrangeStreamdId::AutoStart);
+        }
+
+        if s == "+" {
+            return Ok(XrangeStreamdId::AutoEnd);
+        }
+
+        // Try to parse as a single integer first if it succedes it means it's something like this:
+        // 1526985054069 not like this 1526985054069-1
+        if let Ok(ms_time) = s.parse::<u64>() {
+            return Ok(XrangeStreamdId::AutoSequence { ms_time });
+        }
+
+        let mut parts = s.splitn(2, '-');
+        let ms_part = parts.next().ok_or(ParseStreamIdError::MissingPart)?;
+        let seq_part = parts.next().ok_or(ParseStreamIdError::MissingPart)?;
+
+        let ms_time = ms_part
+            .parse::<u64>()
+            .map_err(|_| ParseStreamIdError::InvalidNumber)?;
+        let seq = seq_part
+            .parse::<u64>()
+            .map_err(|_| ParseStreamIdError::InvalidNumber)?;
+        Ok(XrangeStreamdId::Literal(StreamId { ms_time, seq }))
     }
 }
 

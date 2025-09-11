@@ -29,11 +29,16 @@ macro_rules! resp_bytes {
     };
 
     // Array: resp!(array => [resp!(bulk "one"), resp!(int 2)])
-    (array => [$($elem:expr),*]) => {
-        Frame::Array(vec![$($elem),*]).to_resp_bytes()
-    };
-
-    // Boolean: resp!(bool true)
+     (array => [$($elem:expr),*]) => {
+         Frame::Array(vec![$($elem),*]).to_resp_bytes()
+     };
+ 
+     (array => $vec:expr) => {
+         Frame::Array($vec).to_resp_bytes()
+     };
+ 
+ 
+     // Boolean: resp!(bool true)
     (bool $b:expr) => {
         Frame::Boolean($b).to_resp_bytes()
     };
@@ -119,6 +124,10 @@ macro_rules! resp {
     // Array: resp!(array => [resp!(bulk "one"), resp!(int 2)])
     (array => [$($elem:expr),*]) => {
         Frame::Array(vec![$($elem),*])
+    };
+
+    (array => $vec:expr) => {
+        Frame::Array($vec)
     };
 
     // Boolean: resp!(bool true)

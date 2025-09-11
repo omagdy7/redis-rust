@@ -1,4 +1,4 @@
-use crate::frame::{Frame, ParsedStreamId};
+use crate::frame::{Frame, StreamId, XaddStreamId, XrangeStreamdId};
 use std::{
     collections::HashMap,
     time::{SystemTime, UNIX_EPOCH},
@@ -127,7 +127,16 @@ pub enum RedisCommand {
     ReplConf((String, String)),
     Psync((String, String)),
     Wait((String, String)),
-    Xadd { key: String, parsed_id: ParsedStreamId, fields: HashMap<String, String> },
+    Xadd {
+        key: String,
+        parsed_id: XaddStreamId,
+        fields: HashMap<String, String>,
+    },
+    XRange {
+        key: String,
+        start: XrangeStreamdId,
+        end: XrangeStreamdId,
+    },
     Invalid,
 }
 
@@ -288,7 +297,7 @@ impl From<Frame> for RedisCommand {
                     return Self::Invalid;
                 };
 
-                let parsed_id: ParsedStreamId = stream_id.parse().unwrap();
+                let parsed_id: XaddStreamId = stream_id.parse().unwrap();
                 let mut fields: HashMap<String, String> = HashMap::new();
                 while let (Some(field_key), Some(value)) = (args.next(), args.next()) {
                     fields.insert(field_key, value);
@@ -297,6 +306,26 @@ impl From<Frame> for RedisCommand {
                     key: key,
                     parsed_id,
                     fields,
+                }
+            }
+            "XRANGE" => {
+                let Some(key) = args.next() else {
+                    return Self::Invalid;
+                };
+                let Some(start) = args.next() else {
+                    return Self::Invalid;
+                };
+                let Some(end) = args.next() else {
+                    return Self::Invalid;
+                };
+
+                let start_id: XrangeStreamdId = start.parse().unwrap();
+                let end_id: XrangeStreamdId = end.parse().unwrap();
+
+                Self::XRange {
+                    key: key,
+                    start: start_id,
+                    end: end_id,
                 }
             }
             "TYPE" => match args.next() {

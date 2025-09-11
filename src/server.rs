@@ -1,5 +1,5 @@
-use crate::frame::Frame;
-use crate::frame::{ParsedStreamId, StreamEntry, StreamId};
+use crate::frame::{Frame, XrangeStreamdId};
+use crate::frame::{StreamEntry, StreamId, XaddStreamId};
 use crate::rdb::{ExpiryUnit, FromBytes, RDBFile, RedisValue};
 use crate::resp_commands::{ExpiryOption, RedisCommand, SetCondition};
 use crate::resp_parser::parse;
@@ -11,7 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify, mpsc::Sender};
 use tokio::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info};
 
 // function for debugging purposes
 pub fn bytes_to_ascii(bytes: &[u8]) -> String {
@@ -883,7 +883,7 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
         use RedisCommand as RC;
 
         fn resolve_stream_id(
-            parsed_id: ParsedStreamId,
+            parsed_id: XaddStreamId,
             last_id: Option<StreamId>,
         ) -> Result<StreamId, String> {
             let now = std::time::SystemTime::now()
@@ -892,8 +892,8 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 .as_millis() as u64;
 
             match parsed_id {
-                ParsedStreamId::Literal(id) => Ok(id),
-                ParsedStreamId::AutoSequence { ms_time } => {
+                XaddStreamId::Literal(id) => Ok(id),
+                XaddStreamId::AutoSequence { ms_time } => {
                     if let Some(last) = last_id {
                         if last.ms_time == ms_time {
                             Ok(StreamId {
@@ -911,7 +911,7 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                         Ok(StreamId { ms_time, seq })
                     }
                 }
-                ParsedStreamId::Auto => {
+                XaddStreamId::Auto => {
                     if let Some(last) = last_id {
                         if last.ms_time == now {
                             Ok(StreamId {
@@ -1082,9 +1082,9 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 fields,
             } => {
                 info!("Received XADD command for key: {}", key);
-                info!("Attempting to lock cache for SET");
+                info!("Attempting to lock cache for XADD");
                 let mut cache = self.cache.lock().await;
-                info!("Cache lock acquired for SET");
+                info!("Cache lock acquired for XADD");
 
                 // Get the last stream entry to determine the next ID
                 let last_id = if let Some(entry) = cache.get(&key) {
@@ -1132,6 +1132,143 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for MasterServer<
                 drop(cache);
 
                 resp_bytes!(bulk stream_id.to_string())
+            }
+            RC::XRange { key, start, end } => {
+                info!("Received XRange command for key: {}", key);
+                info!("Attempting to lock cache for XRANGE");
+                let cache = self.cache.lock().await;
+                info!("Cache lock acquired for XRANGE");
+
+                if let Some(entry) = cache.get(&key) {
+                    if let Frame::Stream(ref vec) = entry.value {
+                        info!(
+                            "In XRANGE execution and for key {} and the Steam is : {:?}",
+                            key, vec
+                        );
+                        match (start, end) {
+                            (XrangeStreamdId::Literal(start), XrangeStreamdId::Literal(end)) => {
+                                let filtered_streams: Vec<&StreamEntry> = vec
+                                    .iter()
+                                    .filter(|stream| stream.id >= start && stream.id <= end)
+                                    .collect();
+
+                                let mut filtered_frames = vec![];
+                                for stream in filtered_streams {
+                                    let id_str = stream.id.to_string();
+                                    filtered_frames.push(vec![resp!(bulk id_str)]);
+                                    let fields = stream
+                                        .fields
+                                        .iter()
+                                        .map(|(key, value)| resp!(array => [resp!(bulk key.clone()), resp!(bulk value.clone())]))
+                                        .collect::<Vec<Frame>>();
+                                    filtered_frames
+                                        .last_mut()
+                                        .unwrap()
+                                        .extend_from_slice(&fields);
+                                }
+                                let filtered_frames: Vec<Frame> = filtered_frames
+                                    .into_iter()
+                                    .map(|x| resp!(array => x))
+                                    .collect();
+                                return resp_bytes!(array => filtered_frames);
+                            }
+                            (
+                                XrangeStreamdId::AutoSequence { ms_time: start },
+                                XrangeStreamdId::AutoSequence { ms_time: end },
+                            ) => {
+                                let filtered_streams: Vec<&StreamEntry> = vec
+                                    .iter()
+                                    .filter(|stream| {
+                                        stream.id.ms_time >= start && stream.id.ms_time <= end
+                                    })
+                                    .collect();
+
+                                let mut filtered_frames = vec![];
+                                for stream in filtered_streams {
+                                    let id_str = stream.id.to_string();
+                                    filtered_frames.push(vec![resp!(bulk id_str)]);
+                                    let fields = stream
+                                        .fields
+                                        .values()
+                                        .map(|x| resp!(bulk x.clone()))
+                                        .collect::<Vec<Frame>>();
+                                    filtered_frames
+                                        .last_mut()
+                                        .unwrap()
+                                        .extend_from_slice(&fields);
+                                }
+                                let filtered_frames: Vec<Frame> = filtered_frames
+                                    .into_iter()
+                                    .map(|x| resp!(array => x))
+                                    .collect();
+                                return resp_bytes!(array => filtered_frames);
+                            }
+                            (
+                                XrangeStreamdId::AutoStart,
+                                XrangeStreamdId::AutoSequence { ms_time: end },
+                            ) => {
+                                let filtered_streams: Vec<&StreamEntry> = vec
+                                    .iter()
+                                    .filter(|stream| stream.id.ms_time <= end)
+                                    .collect();
+
+                                let mut filtered_frames = vec![];
+                                for stream in filtered_streams {
+                                    let id_str = stream.id.to_string();
+                                    filtered_frames.push(vec![resp!(bulk id_str)]);
+                                    let fields = stream
+                                        .fields
+                                        .values()
+                                        .map(|x| resp!(bulk x.clone()))
+                                        .collect::<Vec<Frame>>();
+                                    filtered_frames
+                                        .last_mut()
+                                        .unwrap()
+                                        .extend_from_slice(&fields);
+                                }
+                                let filtered_frames: Vec<Frame> = filtered_frames
+                                    .into_iter()
+                                    .map(|x| resp!(array => x))
+                                    .collect();
+                                return resp_bytes!(array => filtered_frames);
+                            }
+                            (
+                                XrangeStreamdId::AutoSequence { ms_time: start },
+                                XrangeStreamdId::AutoEnd,
+                            ) => {
+                                let filtered_streams: Vec<&StreamEntry> = vec
+                                    .iter()
+                                    .filter(|stream| stream.id.ms_time >= start)
+                                    .collect();
+
+                                let mut filtered_frames = vec![];
+                                for stream in filtered_streams {
+                                    let id_str = stream.id.to_string();
+                                    filtered_frames.push(vec![resp!(bulk id_str)]);
+                                    let fields = stream
+                                        .fields
+                                        .values()
+                                        .map(|x| resp!(bulk x.clone()))
+                                        .collect::<Vec<Frame>>();
+                                    filtered_frames
+                                        .last_mut()
+                                        .unwrap()
+                                        .extend_from_slice(&fields);
+                                }
+                                let filtered_frames: Vec<Frame> = filtered_frames
+                                    .into_iter()
+                                    .map(|x| resp!(array => x))
+                                    .collect();
+                                return resp_bytes!(array => filtered_frames);
+                            }
+                            (_, _) => unreachable!("This is logically impossible"),
+                        };
+                    }
+                }
+
+                drop(cache);
+
+                resp_bytes!(error "ERR")
             }
             RC::ConfigGet(s) => {
                 info!("Received CONFIG GET for key: {}", s);
@@ -1392,6 +1529,10 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                 fields,
             } => {
                 todo!("Implement XADD for slaves")
+            }
+
+            RC::XRange { key, start, end } => {
+                todo!("Implement XRange for slaves")
             }
             RC::ReplConf((op1, op2)) => {
                 if op1.to_uppercase() == "GETACK" && op2 == "*" {
