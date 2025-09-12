@@ -339,15 +339,59 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                 // The current setup applies it regardless, which is fine for now.
                 let mut cache = self.cache.lock().await;
                 let expires_at = command.calculate_expiry_time();
+
+                let frame_value = command.value.clone();
+
                 cache.insert(
                     command.key,
                     CacheEntry {
-                        value: Frame::BulkString(command.value.into()),
+                        value: frame_value,
                         expires_at,
                     },
                 );
                 // Slaves do not propagate writes and typically respond with OK.
                 Ok(frame_bytes!("OK"))
+            }
+            RC::Incr { key } => {
+                info!("Received INCR command for key: {}", key);
+                info!("Attempting to lock cache for Incr");
+                let mut cache = self.cache.lock().await;
+                info!("Cache lock acquired for Incr");
+
+                let key_exists = cache.contains_key(&key);
+                info!("Key exists? {}", key_exists);
+
+                let mut response = frame_bytes!(int 1);
+
+                if let Some(entry) = cache.get_mut(&key) {
+                    match &mut entry.value {
+                        Frame::Integer(i) => {
+                            info!("updated key {} from {} to {}", key, *i, *i + 1);
+                            *i += 1;
+                            let new_i = *i;
+                            response = frame_bytes!(int new_i);
+                        }
+                        _ => {
+                            response =
+                                frame_bytes!(error "ERR value is not an integer or out of range");
+                        }
+                    }
+                } else {
+                    // Insert new key with value = 1
+                    cache.insert(
+                        key.to_string(),
+                        CacheEntry {
+                            value: Frame::Integer(1),
+                            expires_at: None,
+                        },
+                    );
+                    info!("Inserted key {} with 1", key);
+                }
+
+                drop(cache);
+                info!("Released cache lock for SET");
+
+                Ok(response)
             }
             RC::Xadd {
                 key: _,

@@ -342,6 +342,7 @@ async fn handle_generic_command(
         let mut writer_guard = writer.lock().await;
         info!("Writer lock acquired to send response");
         writer_guard.write_all(&response).await?;
+        writer_guard.flush().await?;
         info!("Response sent to {}", socket_addr);
     } else {
         info!("Empty response, nothing sent to {}", socket_addr);

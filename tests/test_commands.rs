@@ -85,7 +85,7 @@ mod command_parser_tests {
         match RedisCommand::from(cmd) {
             RedisCommand::Set(c) => {
                 assert_eq!(c.key, "mykey");
-                assert_eq!(c.value, "myvalue");
+                assert_eq!(c.value, Frame::BulkString("myvalue".into()));
                 assert!(c.condition.is_none() && c.expiry.is_none() && !c.get_old_value);
             }
             _ => panic!("Expected SET command"),
@@ -296,11 +296,12 @@ mod set_command_tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use codecrafters_redis::commands::{ExpiryOption, SetCommand};
+    use codecrafters_redis::frame::Frame;
 
     #[test]
     fn test_calculate_expiry_seconds() {
         let cmd =
-            SetCommand::new("k".into(), "v".into()).with_expiry(Some(ExpiryOption::Seconds(10)));
+            SetCommand::new("k".into(), Frame::BulkString("v".into())).with_expiry(Some(ExpiryOption::Seconds(10)));
         let expiry = cmd.calculate_expiry_time().unwrap();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -314,7 +315,7 @@ mod set_command_tests {
     #[test]
     fn test_calculate_expiry_at_seconds() {
         let ts_secs = 1893456000; // 2030-01-01 00:00:00 UTC
-        let cmd = SetCommand::new("k".into(), "v".into())
+        let cmd = SetCommand::new("k".into(), Frame::BulkString("v".into()))
             .with_expiry(Some(ExpiryOption::ExpiresAtSeconds(ts_secs)));
         let expiry = cmd.calculate_expiry_time().unwrap();
         assert_eq!(expiry, ts_secs * 1000);
@@ -323,7 +324,7 @@ mod set_command_tests {
     #[test]
     fn test_calculate_expiry_at_milliseconds() {
         let ts_ms = 1893456000123;
-        let cmd = SetCommand::new("k".into(), "v".into())
+        let cmd = SetCommand::new("k".into(), Frame::BulkString("v".into()))
             .with_expiry(Some(ExpiryOption::ExpiresAtMilliseconds(ts_ms)));
         let expiry = cmd.calculate_expiry_time().unwrap();
         assert_eq!(expiry, ts_ms);
@@ -332,10 +333,10 @@ mod set_command_tests {
     #[test]
     fn test_calculate_expiry_for_none_and_keepttl() {
         let cmd_keepttl =
-            SetCommand::new("k".into(), "v".into()).with_expiry(Some(ExpiryOption::KeepTtl));
+            SetCommand::new("k".into(), Frame::BulkString("v".into())).with_expiry(Some(ExpiryOption::KeepTtl));
         assert!(cmd_keepttl.calculate_expiry_time().is_none());
 
-        let cmd_none = SetCommand::new("k".into(), "v".into()).with_expiry(None);
+        let cmd_none = SetCommand::new("k".into(), Frame::BulkString("v".into())).with_expiry(None);
         assert!(cmd_none.calculate_expiry_time().is_none());
     }
 }

@@ -243,25 +243,25 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     ttl
                 };
 
+                let frame_value = command.value.clone();
+                let broadcast_cmd = frame_bytes!(array => [
+                    frame!(bulk "SET"),
+                    frame!(bulk command.key.clone()),
+                    frame_value.clone()
+                ]);
+
                 // Set the value
                 cache.insert(
                     command.key.clone(),
                     CacheEntry {
-                        value: Frame::BulkString(command.value.clone().into()),
+                        value: frame_value,
                         expires_at,
                     },
                 );
-                info!("Inserted/updated key {}", command.key);
 
+                info!("Inserted/updated key {}", command.key);
                 drop(cache);
                 info!("Released cache lock for SET");
-
-                // Broadcast message to replicas
-                let broadcast_cmd = frame_bytes!(array => [
-                    frame!(bulk "SET"),
-                    frame!(bulk command.key),
-                    frame!(bulk command.value)
-                ]);
 
                 let broadcast_cmd_len = broadcast_cmd.len();
                 info!("Broadcasting SET command, len={}", broadcast_cmd_len);
@@ -289,6 +289,62 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         None => Ok(frame_bytes!(null)),
                     }
                 }
+            }
+            RC::Incr { key } => {
+                info!("Received INCR command for key: {}", key);
+                info!("Attempting to lock cache for Incr");
+                let mut cache = self.cache.lock().await;
+                info!("Cache lock acquired for Incr");
+
+                let key_exists = cache.contains_key(&key);
+                info!("Key exists? {}", key_exists);
+
+                let mut response = frame_bytes!(int 1);
+
+                if let Some(entry) = cache.get_mut(&key) {
+                    match &entry.value {
+                        Frame::BulkString(bytes) => {
+                            // Try to parse as integer
+                            if let Some(mut i) = std::str::from_utf8(bytes)
+                                .ok()
+                                .and_then(|s| s.parse::<i64>().ok())
+                            {
+                                i += 1;
+                                info!("updated key {} from {} to {}", key, i - 1, i);
+
+                                // Store back as BulkString again (Redis semantics)
+                                entry.value = Frame::BulkString(Bytes::from(i.to_string()));
+
+                                // Reply as Integer
+                                response = frame_bytes!(int i);
+                            } else {
+                                info!(
+                                    "Tried to update key {} but it couldn't be parsed as an integer",
+                                    key
+                                );
+                                response = frame_bytes!(error "ERR value is not an integer or out of range");
+                            }
+                        }
+                        _ => {
+                            // If somehow stored as another Frame type, treat as error
+                            response =
+                                frame_bytes!(error "ERR value is not an integer or out of range");
+                        }
+                    }
+                } else {
+                    cache.insert(
+                        key.to_string(),
+                        CacheEntry {
+                            value: Frame::BulkString(Bytes::from("1")),
+                            expires_at: None,
+                        },
+                    );
+                    info!("Inserted key {} with 1", key);
+                }
+                drop(cache);
+                info!("Released cache lock for Incr");
+
+                Ok(response)
             }
             RC::Xadd {
                 key: _,
@@ -355,10 +411,10 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                             let id_str = stream.id.to_string();
                             filtered_frames.push(vec![frame!(bulk id_str)]);
                             let fields = stream
-                                        .fields
-                                        .iter()
-                                        .map(|(key, value)| frame!(array => [frame!(bulk key.clone()), frame!(bulk value.clone())]))
-                                        .collect::<Vec<Frame>>();
+                                                .fields
+                                                .iter()
+                                                .map(|(key, value)| frame!(array => [frame!(bulk key.clone()), frame!(bulk value.clone())]))
+                                                .collect::<Vec<Frame>>();
                             filtered_frames
                                 .last_mut()
                                 .unwrap()
@@ -374,7 +430,6 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
 
                 Ok(frame_bytes!(error "ERR"))
             }
-
             RC::XRead {
                 block_param,
                 keys,

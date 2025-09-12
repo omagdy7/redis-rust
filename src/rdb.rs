@@ -2,14 +2,13 @@
 // https://rdb.fnordig.de/file_format.html#zipmap-encoding
 #![allow(unused)]
 
+use bytes::Bytes;
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
     io, isize,
     path::Path,
 };
-
-use bytes::Bytes;
 
 use crate::commands::ExpiryOption;
 use crate::error::{ParseError, RdbError};
@@ -116,8 +115,6 @@ fn encode_length(len: usize) -> Result<Vec<u8>, RdbError> {
         Err(RdbError::InvalidLength { length: len })
     }
 }
-
-
 
 // Custom parsing trait that returns bytes consumed
 pub trait FromBytes: Sized {

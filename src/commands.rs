@@ -13,6 +13,8 @@ pub enum SetCondition {
     Exists,
 }
 
+
+
 #[derive(Debug, Clone)]
 pub enum ExpiryOption {
     /// EX seconds - expire in N seconds
@@ -46,14 +48,14 @@ pub enum ExpiryOption {
 #[derive(Debug, Clone)]
 pub struct SetCommand {
     pub key: String,
-    pub value: String,
+    pub value: Frame,
     pub condition: Option<SetCondition>,
     pub expiry: Option<ExpiryOption>,
     pub get_old_value: bool,
 }
 
 impl SetCommand {
-    pub fn new(key: String, value: String) -> Self {
+    pub fn new(key: String, value: Frame) -> Self {
         Self {
             key,
             value,
@@ -107,13 +109,7 @@ impl SetCommand {
     }
 }
 
-// Helper function to extract string from BulkString
-fn extract_string(resp: &Frame) -> Option<String> {
-    match resp {
-        Frame::BulkString(bytes) => str::from_utf8(bytes).ok().map(|s| s.to_owned()),
-        _ => None,
-    }
-}
+
 
 // TODO: Refactor this to use enum struct variants with more descreptive names
 #[derive(Debug)]
@@ -129,6 +125,9 @@ pub enum RedisCommand {
     ReplConf((String, String)),
     Psync((String, String)),
     Wait((String, String)),
+    Incr {
+        key: String,
+    },
     Xadd {
         key: String,
         parsed_id: XaddStreamId,
@@ -148,20 +147,54 @@ pub enum RedisCommand {
 }
 
 impl RedisCommand {
-    fn parse_set_command(mut args: impl Iterator<Item = String>) -> Self {
-        let Some(key) = args.next() else {
-            return Self::Invalid;
-        };
-        let Some(value) = args.next() else {
+    /// Helper function to extract a string from a Frame::BulkString
+    fn extract_string(frame: &Frame) -> Option<String> {
+        match frame {
+            Frame::BulkString(bytes) => std::str::from_utf8(bytes)
+                .ok()
+                .map(|s| s.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Helper function to extract a u64 from a Frame (BulkString or Integer)
+    fn extract_u64(frame: &Frame) -> Option<u64> {
+        match frame {
+            Frame::BulkString(bytes) => std::str::from_utf8(bytes)
+                .ok()?
+                .parse::<u64>()
+                .ok(),
+            Frame::Integer(i) => Some(*i as u64),
+            _ => None,
+        }
+    }
+
+    /// Helper function to safely get the next argument from an iterator
+    fn require_next_arg<'a, I>(iter: &mut I) -> Option<I::Item>
+    where
+        I: Iterator<Item = &'a Frame>,
+    {
+        iter.next()
+    }
+
+    fn parse_set_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let key_frame = Self::require_next_arg(&mut args);
+        let value_frame = Self::require_next_arg(&mut args);
+
+        let (Some(key_frame), Some(value_frame)) = (key_frame, value_frame) else {
             return Self::Invalid;
         };
 
-        let options: Vec<String> = args.collect();
+        let Some(key) = Self::extract_string(key_frame) else {
+            return Self::Invalid;
+        };
+
+        let options: Vec<&Frame> = args.collect();
 
         if options.is_empty() {
-            Self::Set(SetCommand::new(key, value))
+            Self::Set(SetCommand::new(key, (*value_frame).clone()))
         } else {
-            let parser = SetOptionParser::new(key, value);
+            let parser = SetOptionParser::new(key, (*value_frame).clone());
             parser
                 .parse_options(&options)
                 .map(Self::Set)
@@ -169,20 +202,36 @@ impl RedisCommand {
         }
     }
 
-    fn parse_xadd_command(mut args: impl Iterator<Item = String>) -> Self {
-        let Some(key) = args.next() else {
-            return Self::Invalid;
-        };
-        let Some(stream_id) = args.next() else {
+    fn parse_xadd_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let key_frame = Self::require_next_arg(&mut args);
+        let stream_id_frame = Self::require_next_arg(&mut args);
+
+        let (Some(key_frame), Some(stream_id_frame)) = (key_frame, stream_id_frame) else {
             return Self::Invalid;
         };
 
-        let Ok(parsed_id) = stream_id.parse::<XaddStreamId>() else {
+        let Some(key) = Self::extract_string(key_frame) else {
+            return Self::Invalid;
+        };
+
+        let Some(stream_id_str) = Self::extract_string(stream_id_frame) else {
+            return Self::Invalid;
+        };
+
+        let Ok(parsed_id) = stream_id_str.parse::<XaddStreamId>() else {
             return Self::Invalid;
         };
 
         let mut fields = HashMap::new();
-        while let (Some(field_key), Some(value)) = (args.next(), args.next()) {
+        while let (Some(field_key_frame), Some(value_frame)) = (args.next(), args.next()) {
+            let Some(field_key) = Self::extract_string(field_key_frame) else {
+                return Self::Invalid;
+            };
+
+            let Some(value) = Self::extract_string(value_frame) else {
+                return Self::Invalid;
+            };
+
             fields.insert(field_key, value);
         }
 
@@ -193,21 +242,31 @@ impl RedisCommand {
         }
     }
 
-    fn parse_xrange_command(mut args: impl Iterator<Item = String>) -> Self {
-        let Some(key) = args.next() else {
-            return Self::Invalid;
-        };
-        let Some(start) = args.next() else {
-            return Self::Invalid;
-        };
-        let Some(end) = args.next() else {
+    fn parse_xrange_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let key_frame = Self::require_next_arg(&mut args);
+        let start_frame = Self::require_next_arg(&mut args);
+        let end_frame = Self::require_next_arg(&mut args);
+
+        let (Some(key_frame), Some(start_frame), Some(end_frame)) = (key_frame, start_frame, end_frame) else {
             return Self::Invalid;
         };
 
-        let Ok(start_id) = start.parse::<XrangeStreamdId>() else {
+        let Some(key) = Self::extract_string(key_frame) else {
             return Self::Invalid;
         };
-        let Ok(end_id) = end.parse::<XrangeStreamdId>() else {
+
+        let Some(start_str) = Self::extract_string(start_frame) else {
+            return Self::Invalid;
+        };
+
+        let Some(end_str) = Self::extract_string(end_frame) else {
+            return Self::Invalid;
+        };
+
+        let Ok(start_id) = start_str.parse::<XrangeStreamdId>() else {
+            return Self::Invalid;
+        };
+        let Ok(end_id) = end_str.parse::<XrangeStreamdId>() else {
             return Self::Invalid;
         };
 
@@ -218,15 +277,18 @@ impl RedisCommand {
         }
     }
 
-    fn parse_xread_command(args: impl Iterator<Item = String>) -> Self {
+    fn parse_xread_command<'a>(args: impl Iterator<Item = &'a Frame>) -> Self {
         let mut args = args.peekable();
 
         // Handle optional BLOCK argument
-        let block_param = if args.peek().map(|s| s.as_str()) == Some("block") {
+        let block_param = if args.peek().map(|&f| match f {
+            Frame::BulkString(bytes) => std::str::from_utf8(&bytes).map(|s| s.eq_ignore_ascii_case("block")).unwrap_or(false),
+            _ => false,
+        }).unwrap_or(false) {
             args.next(); // consume "block"
-            match args.next().and_then(|s| s.parse::<u64>().ok()) {
-                Some(ms) => Some(ms),
-                None => return Self::Invalid,
+            match args.next() {
+                Some(frame) => Self::extract_u64(frame),
+                _ => return Self::Invalid,
             }
         } else {
             None
@@ -237,41 +299,207 @@ impl RedisCommand {
             return Self::Invalid;
         }
 
-        let mut args: Vec<String> = args.collect();
-        let i = args.partition_point(|element| element.parse::<XReadStreamId>().is_err());
+        let mut args: Vec<&Frame> = args.collect();
+        let i = args.partition_point(|element| match element {
+            Frame::BulkString(bytes) => match std::str::from_utf8(&bytes) {
+                Ok(s) => s.parse::<XReadStreamId>().is_err(),
+                Err(_) => true,
+            },
+            _ => true,
+        });
 
-        let stream_ids: Result<Vec<_>, _> = args
-            .split_off(i)
-            .iter()
-            .map(|s_id| s_id.parse::<XReadStreamId>())
-            .collect();
+        let stream_frames = args.split_off(i);
+        let mut stream_ids = Vec::new();
+        for frame in &stream_frames {
+            let Some(stream_id_str) = Self::extract_string(frame) else {
+                return Self::Invalid;
+            };
+            let Ok(id) = stream_id_str.parse::<XReadStreamId>() else {
+                return Self::Invalid;
+            };
+            stream_ids.push(id);
+        }
 
-        let Ok(stream_ids) = stream_ids else {
-            return Self::Invalid;
-        };
+        let mut keys = Vec::new();
+        for frame in &args {
+            let Some(key) = Self::extract_string(frame) else {
+                return Self::Invalid;
+            };
+            keys.push(key);
+        }
 
         Self::XRead {
             block_param,
-            keys: args,
+            keys,
             stream_ids,
         }
     }
 
-    fn parse_config_command(mut args: impl Iterator<Item = String>) -> Self {
-        match (args.next(), args.next()) {
-            (Some(sub_command), Some(key)) if sub_command.eq_ignore_ascii_case("GET") => {
-                Self::ConfigGet(key)
-            }
-            _ => Self::Invalid,
+    fn parse_config_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let sub_cmd_frame = Self::require_next_arg(&mut args);
+        let key_frame = Self::require_next_arg(&mut args);
+        let (Some(sub_cmd_frame), Some(key_frame)) = (sub_cmd_frame, key_frame) else {
+            return Self::Invalid;
+        };
+
+        let Some(sub_command) = Self::extract_string(sub_cmd_frame) else {
+            return Self::Invalid;
+        };
+        let Some(key) = Self::extract_string(key_frame) else {
+            return Self::Invalid;
+        };
+
+        if sub_command.eq_ignore_ascii_case("GET") {
+            Self::ConfigGet(key)
+        } else {
+            Self::Invalid
         }
     }
 
-    fn parse_info_command(mut args: impl Iterator<Item = String>) -> Self {
-        match args.next() {
-            Some(sub_command) if sub_command.eq_ignore_ascii_case("REPLICATION") => {
-                Self::Info(sub_command)
-            }
-            _ => Self::Invalid,
+    fn parse_info_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let sub_cmd_frame = Self::require_next_arg(&mut args);
+        let Some(sub_cmd_frame) = sub_cmd_frame else {
+            return Self::Invalid;
+        };
+
+        let Some(sub_command) = Self::extract_string(sub_cmd_frame) else {
+            return Self::Invalid;
+        };
+
+        if sub_command.eq_ignore_ascii_case("REPLICATION") {
+            Self::Info(sub_command)
+        } else {
+            Self::Invalid
+        }
+    }
+
+    fn parse_ping_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        if args.next().is_none() {
+            Self::Ping
+        } else {
+            Self::Invalid
+        }
+    }
+
+    fn parse_echo_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let arg_frame = Self::require_next_arg(&mut args);
+        let (Some(arg_frame), None) = (arg_frame, args.next()) else {
+            return Self::Invalid;
+        };
+        let Some(message) = Self::extract_string(arg_frame) else {
+            return Self::Invalid;
+        };
+        Self::Echo(message)
+    }
+
+    fn parse_get_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let arg_frame = Self::require_next_arg(&mut args);
+        let (Some(arg_frame), None) = (arg_frame, args.next()) else {
+            return Self::Invalid;
+        };
+        let Some(key) = Self::extract_string(arg_frame) else {
+            return Self::Invalid;
+        };
+        Self::Get(key)
+    }
+
+    fn parse_type_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let arg_frame = Self::require_next_arg(&mut args);
+        let Some(arg_frame) = arg_frame else {
+            return Self::Invalid;
+        };
+        let Some(key) = Self::extract_string(arg_frame) else {
+            return Self::Invalid;
+        };
+        Self::Type(key)
+    }
+
+    fn parse_keys_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let arg_frame = Self::require_next_arg(&mut args);
+        let Some(arg_frame) = arg_frame else {
+            return Self::Invalid;
+        };
+        let Some(pattern) = Self::extract_string(arg_frame) else {
+            return Self::Invalid;
+        };
+        Self::Keys(pattern)
+    }
+
+    fn parse_replconf_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let op1_frame = Self::require_next_arg(&mut args);
+        let op2_frame = Self::require_next_arg(&mut args);
+        let (Some(op1_frame), Some(op2_frame)) = (op1_frame, op2_frame) else {
+            return Self::Invalid;
+        };
+        let Some(op1) = Self::extract_string(op1_frame) else {
+            return Self::Invalid;
+        };
+        let Some(op2) = Self::extract_string(op2_frame) else {
+            return Self::Invalid;
+        };
+        Self::ReplConf((op1, op2))
+    }
+
+    fn parse_wait_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let op1_frame = Self::require_next_arg(&mut args);
+        let op2_frame = Self::require_next_arg(&mut args);
+        let (Some(op1_frame), Some(op2_frame)) = (op1_frame, op2_frame) else {
+            return Self::Invalid;
+        };
+        let Some(op1) = Self::extract_string(op1_frame) else {
+            return Self::Invalid;
+        };
+        let Some(op2) = Self::extract_string(op2_frame) else {
+            return Self::Invalid;
+        };
+        Self::Wait((op1, op2))
+    }
+
+    fn parse_psync_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let repl_id_frame = Self::require_next_arg(&mut args);
+        let repl_offset_frame = Self::require_next_arg(&mut args);
+        let (Some(repl_id_frame), Some(repl_offset_frame)) = (repl_id_frame, repl_offset_frame) else {
+            return Self::Invalid;
+        };
+        let Some(repl_id) = Self::extract_string(repl_id_frame) else {
+            return Self::Invalid;
+        };
+        let Some(repl_offset) = Self::extract_string(repl_offset_frame) else {
+            return Self::Invalid;
+        };
+        Self::Psync((repl_id, repl_offset))
+    }
+
+    fn parse_incr_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let key_frame = Self::require_next_arg(&mut args);
+        let Some(key_frame) = key_frame else {
+            return Self::Invalid;
+        };
+        let Some(key) = Self::extract_string(key_frame) else {
+            return Self::Invalid;
+        };
+        Self::Incr { key }
+    }
+
+    /// Unified command parser that handles all Redis commands
+    fn parse_command<'a>(cmd_name: &str, args: impl Iterator<Item = &'a Frame>) -> Self {
+        match cmd_name {
+            "PING" => Self::parse_ping_command(args),
+            "ECHO" => Self::parse_echo_command(args),
+            "GET" => Self::parse_get_command(args),
+            "TYPE" => Self::parse_type_command(args),
+            "KEYS" => Self::parse_keys_command(args),
+            "REPLCONF" => Self::parse_replconf_command(args),
+            "WAIT" => Self::parse_wait_command(args),
+            "PSYNC" => Self::parse_psync_command(args),
+            "INCR" => Self::parse_incr_command(args),
+            "SET" => Self::parse_set_command(args),
+            "XADD" => Self::parse_xadd_command(args),
+            "XRANGE" => Self::parse_xrange_command(args),
+            "XREAD" => Self::parse_xread_command(args),
+            "CONFIG" => Self::parse_config_command(args),
+            "INFO" => Self::parse_info_command(args),
+            _ => Self::Invalid
         }
     }
 }
@@ -282,14 +510,34 @@ struct SetOptionParser {
 }
 
 impl SetOptionParser {
-    fn new(key: String, value: String) -> Self {
+    fn new(key: String, value: Frame) -> Self {
         Self {
             command: SetCommand::new(key, value),
         }
     }
 
-    fn parse_option(&mut self, option: &str, next_arg: Option<&str>) -> Result<bool, &'static str> {
-        match option.to_ascii_uppercase().as_str() {
+    fn parse_option(&mut self, option_frame: &Frame, next_arg_frame: Option<&Frame>) -> Result<bool, &'static str> {
+        let option = match option_frame {
+            Frame::BulkString(bytes) => match std::str::from_utf8(&bytes) {
+                Ok(s) => s.to_ascii_uppercase(),
+                Err(_) => return Err("Invalid option encoding"),
+            },
+            _ => return Err("Option must be a string"),
+        };
+
+        let next_arg_str = match next_arg_frame {
+            Some(Frame::BulkString(bytes)) => match std::str::from_utf8(&bytes) {
+                Ok(s) => Some(s.to_string()),
+                Err(_) => return Err("Invalid argument encoding"),
+            },
+            Some(Frame::Integer(i)) => Some(i.to_string()),
+            Some(_) => return Err("Argument must be a string or integer"),
+            None => None,
+        };
+
+        let next_arg = next_arg_str.as_deref();
+
+        match option.as_str() {
             "GET" => {
                 self.command = self.command.clone().with_get(true);
                 Ok(false) // doesn't consume next argument
@@ -363,11 +611,11 @@ impl SetOptionParser {
         }
     }
 
-    fn parse_options(mut self, options: &[String]) -> Result<SetCommand, &'static str> {
+    fn parse_options(mut self, options: &[&Frame]) -> Result<SetCommand, &'static str> {
         let mut i = 0;
         while i < options.len() {
             let option = &options[i];
-            let next_arg = options.get(i + 1).map(|s| s.as_str());
+            let next_arg = options.get(i + 1).copied();
 
             let consumes_next = self.parse_option(option, next_arg)?;
             i += if consumes_next { 2 } else { 1 };
@@ -382,55 +630,20 @@ impl From<Frame> for RedisCommand {
             return Self::Invalid;
         };
 
-        let mut args = command.iter().filter_map(extract_string);
+        let mut args = command.iter();
 
-        let Some(cmd_name) = args.next() else {
+        let Some(cmd_frame) = args.next() else {
             return Self::Invalid;
         };
 
-        match cmd_name.to_ascii_uppercase().as_str() {
-            "PING" => {
-                if args.next().is_none() {
-                    Self::Ping
-                } else {
-                    Self::Invalid
-                }
-            }
-            "ECHO" => match (args.next(), args.next()) {
-                (Some(echo_string), None) => Self::Echo(echo_string),
-                _ => Self::Invalid,
+        let cmd_name = match cmd_frame {
+            Frame::BulkString(bytes) => match std::str::from_utf8(bytes) {
+                Ok(s) => s.to_ascii_uppercase(),
+                Err(_) => return Self::Invalid,
             },
-            "GET" => match (args.next(), args.next()) {
-                (Some(key), None) => Self::Get(key),
-                _ => Self::Invalid,
-            },
-            "TYPE" => match args.next() {
-                Some(key) => Self::Type(key),
-                None => Self::Invalid,
-            },
-            "KEYS" => match args.next() {
-                Some(query) => Self::Keys(query),
-                None => Self::Invalid,
-            },
-            "REPLCONF" => match (args.next(), args.next()) {
-                (Some(op1), Some(op2)) => Self::ReplConf((op1, op2)),
-                _ => Self::Invalid,
-            },
-            "WAIT" => match (args.next(), args.next()) {
-                (Some(op1), Some(op2)) => Self::Wait((op1, op2)),
-                _ => Self::Invalid,
-            },
-            "PSYNC" => match (args.next(), args.next()) {
-                (Some(repl_id), Some(repl_offset)) => Self::Psync((repl_id, repl_offset)),
-                _ => Self::Invalid,
-            },
-            "SET" => Self::parse_set_command(args),
-            "XADD" => Self::parse_xadd_command(args),
-            "XRANGE" => Self::parse_xrange_command(args),
-            "XREAD" => Self::parse_xread_command(args),
-            "CONFIG" => Self::parse_config_command(args),
-            "INFO" => Self::parse_info_command(args),
-            _ => Self::Invalid,
-        }
+            _ => return Self::Invalid,
+        };
+
+        Self::parse_command(&cmd_name, args)
     }
 }
