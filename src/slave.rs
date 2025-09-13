@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use regex::Regex;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::{
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
@@ -285,152 +285,164 @@ impl SlaveRole for SlaveServer {
 }
 
 impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
-    async fn execute(&self, command: RedisCommand) -> Result<Vec<u8>, RespError> {
-        use RedisCommand as RC;
-        match command {
-            RC::Ping => Ok(frame_bytes!("PONG")),
-            RC::Echo(echo_string) => Ok(frame_bytes!(echo_string)),
-            RC::Get(key) => {
-                let cache = self.cache.lock().await;
-                match cache.get(&key).cloned() {
-                    Some(entry) if !entry.is_expired() => Ok(entry.value.to_resp()),
-                    Some(_) => Ok(frame_bytes!(null)),
-                    None => Ok(frame_bytes!(null)),
-                }
-            }
-            RC::Type(_key) => {
-                todo!()
-            }
-            RC::ConfigGet(s) => match s.as_str() {
-                "dir" => Ok(
-                    frame_bytes!(array => [frame!(bulk s), frame!(bulk self.config.dir.as_deref().unwrap_or(""))]),
-                ),
-                "dbfilename" => Ok(
-                    frame_bytes!(array => [frame!(bulk s), frame!(bulk self.config.dbfilename.as_deref().unwrap_or(""))]),
-                ),
-                _ => Ok(frame_bytes!(array => [])),
-            },
-            RC::Keys(query) => {
-                let query = query.replace('*', ".*");
-                let cache = self.cache.lock().await;
-                let regex = match Regex::new(&query) {
-                    Ok(regex) => regex,
-                    Err(_) => return Err(RespError::InvalidArgument),
-                };
-                let matching_keys: Vec<Frame> = cache
-                    .keys()
-                    .filter(|key| regex.is_match(key))
-                    .map(|key| Frame::BulkString(Bytes::copy_from_slice(key.as_bytes())))
-                    .collect();
-                Ok(Frame::Array(matching_keys).to_resp())
-            }
-            RC::Info(_sub_command) => {
-                // Slaves respond with their role
-                let state = self.state.lock().await;
-                let info_response = format!(
-                    "# Replication\r\nrole:slave\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
-                    state.master_replid, state.master_repl_offset,
-                );
-                Ok(frame_bytes!(bulk info_response))
-            }
-            RC::Set(command) => {
-                // For a slave, write commands are read-only by default. This could be configurable.
-                // If this SET command came from the master, it would be applied.
-                // The current setup applies it regardless, which is fine for now.
-                let mut cache = self.cache.lock().await;
-                let expires_at = command.calculate_expiry_time();
-
-                let frame_value = command.value.clone();
-
-                cache.insert(
-                    command.key,
-                    CacheEntry {
-                        value: frame_value,
-                        expires_at,
-                    },
-                );
-                // Slaves do not propagate writes and typically respond with OK.
-                Ok(frame_bytes!("OK"))
-            }
-            RC::Incr { key } => {
-                info!("Received INCR command for key: {}", key);
-                info!("Attempting to lock cache for Incr");
-                let mut cache = self.cache.lock().await;
-                info!("Cache lock acquired for Incr");
-
-                let key_exists = cache.contains_key(&key);
-                info!("Key exists? {}", key_exists);
-
-                let mut response = frame_bytes!(int 1);
-
-                if let Some(entry) = cache.get_mut(&key) {
-                    match &mut entry.value {
-                        Frame::Integer(i) => {
-                            info!("updated key {} from {} to {}", key, *i, *i + 1);
-                            *i += 1;
-                            let new_i = *i;
-                            response = frame_bytes!(int new_i);
-                        }
-                        _ => {
-                            response =
-                                frame_bytes!(error "ERR value is not an integer or out of range");
-                        }
+    fn execute(
+        &self,
+        command: RedisCommand,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, RespError>> + Send + '_>> {
+        Box::pin(async move {
+            use RedisCommand as RC;
+            match command {
+                RC::Ping => Ok(frame_bytes!("PONG")),
+                RC::Echo(echo_string) => Ok(frame_bytes!(echo_string)),
+                RC::Get(key) => {
+                    let cache = self.cache.lock().await;
+                    match cache.get(&key).cloned() {
+                        Some(entry) if !entry.is_expired() => Ok(entry.value.to_resp()),
+                        Some(_) => Ok(frame_bytes!(null)),
+                        None => Ok(frame_bytes!(null)),
                     }
-                } else {
-                    // Insert new key with value = 1
+                }
+                RC::Type(_key) => {
+                    todo!()
+                }
+                RC::ConfigGet(s) => match s.as_str() {
+                    "dir" => Ok(
+                        frame_bytes!(array => [frame!(bulk s), frame!(bulk self.config.dir.as_deref().unwrap_or(""))]),
+                    ),
+                    "dbfilename" => Ok(
+                        frame_bytes!(array => [frame!(bulk s), frame!(bulk self.config.dbfilename.as_deref().unwrap_or(""))]),
+                    ),
+                    _ => Ok(frame_bytes!(array => [])),
+                },
+                RC::Keys(query) => {
+                    let query = query.replace('*', ".*");
+                    let cache = self.cache.lock().await;
+                    let regex = match Regex::new(&query) {
+                        Ok(regex) => regex,
+                        Err(_) => return Err(RespError::InvalidArgument),
+                    };
+                    let matching_keys: Vec<Frame> = cache
+                        .keys()
+                        .filter(|key| regex.is_match(key))
+                        .map(|key| Frame::BulkString(Bytes::copy_from_slice(key.as_bytes())))
+                        .collect();
+                    Ok(Frame::Array(matching_keys).to_resp())
+                }
+                RC::Info(_sub_command) => {
+                    // Slaves respond with their role
+                    let state = self.state.lock().await;
+                    let info_response = format!(
+                        "# Replication\r\nrole:slave\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
+                        state.master_replid, state.master_repl_offset,
+                    );
+                    Ok(frame_bytes!(bulk info_response))
+                }
+                RC::Multi => {
+                    info!("Received MULTI command");
+                    Ok(frame_bytes!("OK"))
+                }
+                RC::Exec => {
+                    info!("Received EXEC command");
+                    todo!()
+                }
+                RC::Set(command) => {
+                    // For a slave, write commands are read-only by default. This could be configurable.
+                    // If this SET command came from the master, it would be applied.
+                    // The current setup applies it regardless, which is fine for now.
+                    let mut cache = self.cache.lock().await;
+                    let expires_at = command.calculate_expiry_time();
+
+                    let frame_value = command.value.clone();
+
                     cache.insert(
-                        key.to_string(),
+                        command.key,
                         CacheEntry {
-                            value: Frame::Integer(1),
-                            expires_at: None,
+                            value: frame_value,
+                            expires_at,
                         },
                     );
-                    info!("Inserted key {} with 1", key);
+                    // Slaves do not propagate writes and typically respond with OK.
+                    Ok(frame_bytes!("OK"))
+                }
+                RC::Incr { key } => {
+                    info!("Received INCR command for key: {}", key);
+                    info!("Attempting to lock cache for Incr");
+                    let mut cache = self.cache.lock().await;
+                    info!("Cache lock acquired for Incr");
+
+                    let key_exists = cache.contains_key(&key);
+                    info!("Key exists? {}", key_exists);
+
+                    let mut response = frame_bytes!(int 1);
+
+                    if let Some(entry) = cache.get_mut(&key) {
+                        match &mut entry.value {
+                            Frame::Integer(i) => {
+                                info!("updated key {} from {} to {}", key, *i, *i + 1);
+                                *i += 1;
+                                let new_i = *i;
+                                response = frame_bytes!(int new_i);
+                            }
+                            _ => {
+                                response = frame_bytes!(error "ERR value is not an integer or out of range");
+                            }
+                        }
+                    } else {
+                        // Insert new key with value = 1
+                        cache.insert(
+                            key.to_string(),
+                            CacheEntry {
+                                value: Frame::Integer(1),
+                                expires_at: None,
+                            },
+                        );
+                        info!("Inserted key {} with 1", key);
+                    }
+
+                    drop(cache);
+                    info!("Released cache lock for SET");
+
+                    Ok(response)
+                }
+                RC::Xadd {
+                    key: _,
+                    parsed_id: _,
+                    fields: _,
+                } => {
+                    todo!("Implement XADD for slaves")
                 }
 
-                drop(cache);
-                info!("Released cache lock for SET");
-
-                Ok(response)
-            }
-            RC::Xadd {
-                key: _,
-                parsed_id: _,
-                fields: _,
-            } => {
-                todo!("Implement XADD for slaves")
-            }
-
-            RC::XRange {
-                key: _,
-                start: _,
-                end: _,
-            } => {
-                todo!("Implement XRange for slaves")
-            }
-            RC::XRead {
-                block_param: _,
-                keys: _,
-                stream_ids: _,
-            } => {
-                todo!("Implement XRead for slaves")
-            }
-            RC::ReplConf((op1, op2)) => {
-                if op1.to_uppercase() == "GETACK" && op2 == "*" {
-                    let state = self.state.lock().await;
-                    Ok(frame_bytes!(array => [
-                        frame!(bulk "REPLCONF"),
-                        frame!(bulk "ACK"),
-                        frame!(bulk state.master_repl_offset.to_string())
-                    ]))
-                } else {
-                    Ok(frame_bytes!("OK")) // For other REPLCONFs during handshake
+                RC::XRange {
+                    key: _,
+                    start: _,
+                    end: _,
+                } => {
+                    todo!("Implement XRange for slaves")
                 }
+                RC::XRead {
+                    block_param: _,
+                    keys: _,
+                    stream_ids: _,
+                } => {
+                    todo!("Implement XRead for slaves")
+                }
+                RC::ReplConf((op1, op2)) => {
+                    if op1.to_uppercase() == "GETACK" && op2 == "*" {
+                        let state = self.state.lock().await;
+                        Ok(frame_bytes!(array => [
+                            frame!(bulk "REPLCONF"),
+                            frame!(bulk "ACK"),
+                            frame!(bulk state.master_repl_offset.to_string())
+                        ]))
+                    } else {
+                        Ok(frame_bytes!("OK")) // For other REPLCONFs during handshake
+                    }
+                }
+                RC::Psync(_) => Ok(RespError::OperationNotSupported.to_resp()),
+                RC::Wait(_) => Ok(frame_bytes!(error "ERR WAIT cannot be used with replica.")),
+                RC::Invalid => Ok(RespError::InvalidCommandSyntax.to_resp()),
             }
-            RC::Psync(_) => Ok(RespError::OperationNotSupported.to_resp()),
-            RC::Wait(_) => Ok(frame_bytes!(error "ERR WAIT cannot be used with replica.")),
-            RC::Invalid => Ok(RespError::InvalidCommandSyntax.to_resp()),
-        }
+        })
     }
 }
 

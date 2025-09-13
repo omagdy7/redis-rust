@@ -13,8 +13,6 @@ pub enum SetCondition {
     Exists,
 }
 
-
-
 #[derive(Debug, Clone)]
 pub enum ExpiryOption {
     /// EX seconds - expire in N seconds
@@ -109,10 +107,8 @@ impl SetCommand {
     }
 }
 
-
-
 // TODO: Refactor this to use enum struct variants with more descreptive names
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RedisCommand {
     Ping,
     Echo(String),
@@ -125,6 +121,8 @@ pub enum RedisCommand {
     ReplConf((String, String)),
     Psync((String, String)),
     Wait((String, String)),
+    Multi,
+    Exec,
     Incr {
         key: String,
     },
@@ -150,9 +148,7 @@ impl RedisCommand {
     /// Helper function to extract a string from a Frame::BulkString
     fn extract_string(frame: &Frame) -> Option<String> {
         match frame {
-            Frame::BulkString(bytes) => std::str::from_utf8(bytes)
-                .ok()
-                .map(|s| s.to_string()),
+            Frame::BulkString(bytes) => std::str::from_utf8(bytes).ok().map(|s| s.to_string()),
             _ => None,
         }
     }
@@ -160,10 +156,7 @@ impl RedisCommand {
     /// Helper function to extract a u64 from a Frame (BulkString or Integer)
     fn extract_u64(frame: &Frame) -> Option<u64> {
         match frame {
-            Frame::BulkString(bytes) => std::str::from_utf8(bytes)
-                .ok()?
-                .parse::<u64>()
-                .ok(),
+            Frame::BulkString(bytes) => std::str::from_utf8(bytes).ok()?.parse::<u64>().ok(),
             Frame::Integer(i) => Some(*i as u64),
             _ => None,
         }
@@ -247,7 +240,9 @@ impl RedisCommand {
         let start_frame = Self::require_next_arg(&mut args);
         let end_frame = Self::require_next_arg(&mut args);
 
-        let (Some(key_frame), Some(start_frame), Some(end_frame)) = (key_frame, start_frame, end_frame) else {
+        let (Some(key_frame), Some(start_frame), Some(end_frame)) =
+            (key_frame, start_frame, end_frame)
+        else {
             return Self::Invalid;
         };
 
@@ -281,10 +276,16 @@ impl RedisCommand {
         let mut args = args.peekable();
 
         // Handle optional BLOCK argument
-        let block_param = if args.peek().map(|&f| match f {
-            Frame::BulkString(bytes) => std::str::from_utf8(&bytes).map(|s| s.eq_ignore_ascii_case("block")).unwrap_or(false),
-            _ => false,
-        }).unwrap_or(false) {
+        let block_param = if args
+            .peek()
+            .map(|&f| match f {
+                Frame::BulkString(bytes) => std::str::from_utf8(&bytes)
+                    .map(|s| s.eq_ignore_ascii_case("block"))
+                    .unwrap_or(false),
+                _ => false,
+            })
+            .unwrap_or(false)
+        {
             args.next(); // consume "block"
             match args.next() {
                 Some(frame) => Self::extract_u64(frame),
@@ -454,11 +455,27 @@ impl RedisCommand {
         };
         Self::Wait((op1, op2))
     }
+    fn parse_multi_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        if args.next().is_none() {
+            Self::Multi
+        } else {
+            Self::Invalid
+        }
+    }
+
+    fn parse_exec_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        if args.next().is_none() {
+            Self::Exec
+        } else {
+            Self::Invalid
+        }
+    }
 
     fn parse_psync_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
         let repl_id_frame = Self::require_next_arg(&mut args);
         let repl_offset_frame = Self::require_next_arg(&mut args);
-        let (Some(repl_id_frame), Some(repl_offset_frame)) = (repl_id_frame, repl_offset_frame) else {
+        let (Some(repl_id_frame), Some(repl_offset_frame)) = (repl_id_frame, repl_offset_frame)
+        else {
             return Self::Invalid;
         };
         let Some(repl_id) = Self::extract_string(repl_id_frame) else {
@@ -491,6 +508,8 @@ impl RedisCommand {
             "KEYS" => Self::parse_keys_command(args),
             "REPLCONF" => Self::parse_replconf_command(args),
             "WAIT" => Self::parse_wait_command(args),
+            "MULTI" => Self::parse_multi_command(args),
+            "EXEC" => Self::parse_exec_command(args),
             "PSYNC" => Self::parse_psync_command(args),
             "INCR" => Self::parse_incr_command(args),
             "SET" => Self::parse_set_command(args),
@@ -499,7 +518,7 @@ impl RedisCommand {
             "XREAD" => Self::parse_xread_command(args),
             "CONFIG" => Self::parse_config_command(args),
             "INFO" => Self::parse_info_command(args),
-            _ => Self::Invalid
+            _ => Self::Invalid,
         }
     }
 }
@@ -516,7 +535,11 @@ impl SetOptionParser {
         }
     }
 
-    fn parse_option(&mut self, option_frame: &Frame, next_arg_frame: Option<&Frame>) -> Result<bool, &'static str> {
+    fn parse_option(
+        &mut self,
+        option_frame: &Frame,
+        next_arg_frame: Option<&Frame>,
+    ) -> Result<bool, &'static str> {
         let option = match option_frame {
             Frame::BulkString(bytes) => match std::str::from_utf8(&bytes) {
                 Ok(s) => s.to_ascii_uppercase(),

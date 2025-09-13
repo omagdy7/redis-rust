@@ -315,7 +315,7 @@ async fn handle_generic_command(
 
     // Special handling for REPLCONF ACK if master
     if role == "master" {
-            if let RedisCommand::ReplConf((ref op1, ref op2)) = command {
+        if let RedisCommand::ReplConf((ref op1, ref op2)) = command {
             info!("Received REPLCONF command: op1={}, op2={}", op1, op2);
             if op1.to_uppercase() == "ACK" {
                 handle_replconf_ack(socket_addr, op2, acks_map, ack_notifier).await?;

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::{env, sync::Arc};
 
 use crate::commands::RedisCommand;
@@ -5,6 +7,7 @@ use crate::error::RespError;
 use crate::master::MasterServer;
 use crate::shared_cache::Cache;
 use crate::slave::{SlaveRole, SlaveServer};
+use crate::transaction::Transaction;
 use crate::types::*;
 
 #[derive(Debug, Clone)]
@@ -145,6 +148,17 @@ impl RedisServer {
             Self::Master(m) => m.config(),
             Self::Slave(s) => s.config(),
         }
+    }
+
+    pub fn transaction(&self) -> Option<&SharedMut<HashMap<SocketAddr, Transaction>>> {
+        match self {
+            Self::Master(m) => Some(&m.transactions),
+            Self::Slave(_) => None,
+        }
+    }
+
+    pub fn set_connection_socket(&mut self) {
+        if let Self::Master(_m) = self {}
     }
 
     pub fn cache(&self) -> &SharedMut<Cache> {

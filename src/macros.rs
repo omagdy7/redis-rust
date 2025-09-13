@@ -110,6 +110,7 @@ macro_rules! frame {
     (simple $s:expr) => {
         Frame::SimpleString($s.to_string())
     };
+
     ($s:expr) => {
         Frame::SimpleString($s.to_string())
     };

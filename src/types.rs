@@ -1,4 +1,6 @@
 use std::{future::Future, net::SocketAddr, sync::Arc};
+use std::pin::Pin;
+
 use tokio::io::AsyncWrite;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -165,7 +167,7 @@ impl SlaveState {
 }
 
 pub trait CommandHandler<W: AsyncWrite + Send + Unpin + 'static> {
-    fn execute(&self, command: RedisCommand) -> impl Future<Output = Result<Vec<u8>, RespError>>;
+    fn execute(&self, command: RedisCommand) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, RespError>> + Send + '_>>;
 }
 
 pub trait ServerStateTrait {
