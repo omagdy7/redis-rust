@@ -10,7 +10,7 @@ pub enum TxState {
 #[derive(Debug, Clone)]
 pub struct Transaction {
     pub commands: Vec<RedisCommand>,
-    state: TxState,
+    pub state: TxState,
 }
 
 impl Transaction {

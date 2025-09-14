@@ -14,7 +14,6 @@ use tokio::{
 };
 use tracing::{error, info};
 
-use crate::frame::Frame;
 use crate::shared_cache::{Cache, CacheEntry};
 use crate::stream::{StreamEntry, StreamId, XReadStreamId, XrangeStreamdId};
 use crate::types::*;
@@ -23,6 +22,7 @@ use crate::{
     transaction::Transaction,
 };
 use crate::{error::RespError, transaction};
+use crate::{frame::Frame, transaction::TxState};
 
 #[derive(Debug, Clone)]
 pub struct MasterServer {
@@ -783,8 +783,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     response
                 }
                 RC::Exec => {
-                    info!("Received Multi command");
-                    info!("Starting transaction");
+                    info!("Received EXEC command");
                     let transactions = self.transactions.as_ref();
                     let mut transactions_guard = transactions.lock().await;
                     let mut response = Err(RespError::ExecWithoutMulti);
@@ -793,39 +792,51 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                             // Key does exist meaning MULTI has at least executed once
                             let transaction = entry.get_mut();
                             match transaction.state() {
-                                transaction::TxState::Idle => {
-                                    // response should be empty array
-                                }
+                                transaction::TxState::Idle => {}
                                 transaction::TxState::Queuing => {
                                     if transaction.is_empty_queue() {
-                                        response = Ok(frame_bytes!(array => vec![]))
+                                        info!("State is queuing and commands queue is empty");
+                                        response = Ok(frame_bytes!(array => vec![]));
+                                        drop(transactions_guard);
                                     } else {
                                         // execute the commands
-                                        let mut arr =
-                                            Vec::with_capacity(transaction.commands.len());
-                                        for (i, cmd) in transaction.commands.iter().enumerate() {
+                                        info!("State is queuing and commands isn't empty");
+                                        let commands = transaction.commands.clone();
+                                        info!("commands.len() = {}", commands.len());
+                                        let mut arr = Vec::new();
+                                        info!("The commands to be executed are : {:?}", commands);
+                                        transaction.state = TxState::Idle;
+                                        drop(transactions_guard);
+                                        for (i, cmd) in commands.iter().enumerate() {
+                                            info!("i: {i}, Executing command {cmd:?} in Exec");
                                             match self.execute(cmd.clone(), connection_socket).await
                                             {
-                                                Ok(bytes) => arr[i] = bytes,
-                                                Err(error) => arr[i] = error.to_resp(),
+                                                Ok(bytes) => arr.push(bytes),
+                                                Err(error) => arr.push(error.to_resp()),
                                             }
                                         }
 
                                         let arr_clone = arr.clone();
-                                        let flatten_arr = arr_clone.into_iter().flatten().collect();
+                                        let flatten_arr = arr_clone
+                                            .into_iter()
+                                            .filter(|bytes| Frame::from_resp(&bytes).is_ok())
+                                            .map(|bytes| Frame::from_resp(&bytes).unwrap().0)
+                                            .collect();
 
-                                        response = Ok(flatten_arr)
+                                        response = Ok(frame_bytes!(array => flatten_arr))
                                     }
                                 }
                                 transaction::TxState::Discarded => todo!(),
                             }
                         }
                         Entry::Vacant(_) => {
+                            drop(transactions_guard);
                             // Key doesn't exist meaning there is no transaction started and I should
                             // return the default response which is the ExecWithoutMulti error
                         }
                     }
 
+                    let mut transactions_guard = transactions.lock().await;
                     info!("Clearning transaction after EXEC");
                     transactions_guard.remove(&connection_socket);
                     response
@@ -903,6 +914,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         frame!(bulk "GETACK"),
                         frame!(bulk "*")
                     ]);
+
                     let _ = self
                         .replication_msg_sender
                         .send(ReplicationMsg::Broadcast(getack_cmd))

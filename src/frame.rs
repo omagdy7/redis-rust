@@ -56,6 +56,11 @@ pub enum Frame {
     RedisHash(HashMap<Bytes, Bytes>),
 }
 
+/// Find CRLF position in a byte slice
+fn find_crlf(data: &[u8]) -> Option<usize> {
+    data.windows(2).position(|w| w == b"\r\n")
+}
+
 impl Frame {
     /// Convert Frame to RESP bytes for network transmission
     pub fn to_resp(&self) -> Vec<u8> {
@@ -209,6 +214,105 @@ impl Frame {
                 }
                 result
             }
+        }
+    }
+
+    pub fn from_resp(data: &[u8]) -> Result<(Frame, usize), String> {
+        if data.is_empty() {
+            return Err("Empty input".to_string());
+        }
+
+        match data[0] {
+            b'+' => {
+                // Simple String
+                if let Some(pos) = find_crlf(&data[1..]) {
+                    let s = String::from_utf8_lossy(&data[1..pos + 1]).to_string();
+                    Ok((Frame::SimpleString(s), pos + 3)) // + and CRLF
+                } else {
+                    Err("Malformed SimpleString".to_string())
+                }
+            }
+            b'-' => {
+                // Simple Error
+                if let Some(pos) = find_crlf(&data[1..]) {
+                    let s = String::from_utf8_lossy(&data[1..pos + 1]).to_string();
+                    Ok((Frame::SimpleError(s), pos + 3))
+                } else {
+                    Err("Malformed SimpleError".to_string())
+                }
+            }
+            b':' => {
+                // Integer
+                if let Some(pos) = find_crlf(&data[1..]) {
+                    let num_str = &data[1..pos + 1];
+                    let i: i64 = String::from_utf8_lossy(num_str)
+                        .parse()
+                        .map_err(|_| "Invalid integer")?;
+                    Ok((Frame::Integer(i), pos + 3))
+                } else {
+                    Err("Malformed Integer".to_string())
+                }
+            }
+            b'$' => {
+                // Bulk String
+                if let Some(pos) = find_crlf(&data[1..]) {
+                    let len_str = &data[1..pos + 1];
+                    let len: isize = String::from_utf8_lossy(len_str)
+                        .parse()
+                        .map_err(|_| "Invalid bulk length")?;
+                    let consumed = pos + 3;
+                    if len == -1 {
+                        Ok((Frame::Null, consumed))
+                    } else {
+                        let len = len as usize;
+                        if data.len() < consumed + len + 2 {
+                            return Err("Truncated bulk string".to_string());
+                        }
+                        let bulk = &data[consumed..consumed + len];
+                        Ok((
+                            Frame::BulkString(Bytes::copy_from_slice(bulk)),
+                            consumed + len + 2,
+                        ))
+                    }
+                } else {
+                    Err("Malformed BulkString".to_string())
+                }
+            }
+            b'*' => {
+                // Array
+                if let Some(pos) = find_crlf(&data[1..]) {
+                    let len_str = &data[1..pos + 1];
+                    let len: isize = String::from_utf8_lossy(len_str)
+                        .parse()
+                        .map_err(|_| "Invalid array length")?;
+                    let mut consumed = pos + 3;
+                    if len == -1 {
+                        return Ok((Frame::NullArray, consumed));
+                    }
+                    let len = len as usize;
+                    let mut items = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        let (frame, used) = Frame::from_resp(&data[consumed..])?;
+                        items.push(frame);
+                        consumed += used;
+                    }
+                    Ok((Frame::Array(items), consumed))
+                } else {
+                    Err("Malformed Array".to_string())
+                }
+            }
+            b'#' => {
+                // Boolean
+                if data.len() < 3 {
+                    return Err("Truncated boolean".to_string());
+                }
+                match data[1] {
+                    b't' => Ok((Frame::Boolean(true), 3)),
+                    b'f' => Ok((Frame::Boolean(false), 3)),
+                    _ => Err("Invalid boolean".to_string()),
+                }
+            }
+            _ => Err("Unsupported or unknown RESP type".to_string()),
         }
     }
 
