@@ -1,5 +1,5 @@
-use std::{future::Future, net::SocketAddr, sync::Arc};
 use std::pin::Pin;
+use std::{future::Future, net::SocketAddr, sync::Arc};
 
 use tokio::io::AsyncWrite;
 use tokio::net::TcpStream;
@@ -48,12 +48,6 @@ pub struct SlaveState {
     pub master_port: String,
     pub role: ServerRole,
     pub connection: Option<Arc<Mutex<TcpStream>>>,
-}
-
-#[derive(Debug)]
-pub struct ReplicaConnection {
-    pub port: String,
-    pub connection: Arc<Mutex<TcpStream>>,
 }
 
 pub enum ReplicationMsg {
@@ -167,7 +161,11 @@ impl SlaveState {
 }
 
 pub trait CommandHandler<W: AsyncWrite + Send + Unpin + 'static> {
-    fn execute(&self, command: RedisCommand) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, RespError>> + Send + '_>>;
+    fn execute(
+        &self,
+        command: RedisCommand,
+        connection_socket: SocketAddr,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, RespError>> + Send + '_>>;
 }
 
 pub trait ServerStateTrait {

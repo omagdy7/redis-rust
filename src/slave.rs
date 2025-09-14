@@ -1,6 +1,12 @@
 use bytes::Bytes;
 use regex::Regex;
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    pin::Pin,
+    sync::Arc,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
@@ -197,9 +203,18 @@ impl SlaveRole for SlaveServer {
                             // Some commands from master (like REPLCONF) require an acknowledgement.
                             let needs_reply = matches!(command, RedisCommand::ReplConf(..));
 
-                            let response =
-                                <SlaveServer as CommandHandler<TcpStream>>::execute(&self, command)
-                                    .await;
+                            let connection_socket =
+                                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 420);
+
+                            let response = <SlaveServer as CommandHandler<TcpStream>>::execute(
+                                &self,
+                                command,
+                                // HACK: This connection_socket is literally meanings less because
+                                // it won't really be used as part of any logic but I should send
+                                // and Option of SocketAddr instead
+                                connection_socket,
+                            )
+                            .await;
 
                             match response {
                                 Ok(response_bytes) => {
@@ -288,6 +303,7 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
     fn execute(
         &self,
         command: RedisCommand,
+        _connection_socket: SocketAddr,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, RespError>> + Send + '_>> {
         Box::pin(async move {
             use RedisCommand as RC;
@@ -339,10 +355,14 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                 }
                 RC::Multi => {
                     info!("Received MULTI command");
-                    Ok(frame_bytes!("OK"))
+                    todo!()
                 }
                 RC::Exec => {
                     info!("Received EXEC command");
+                    todo!()
+                }
+                RC::Discard => {
+                    info!("Received Discard command");
                     todo!()
                 }
                 RC::Set(command) => {

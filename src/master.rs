@@ -158,10 +158,41 @@ impl MasterServer {
     }
 }
 
+impl MasterServer {
+    async fn check_and_queue_transaction(
+        &self,
+        command: &RedisCommand,
+        connection_socket: SocketAddr,
+    ) -> bool {
+        info!("Attempting to lock transactions");
+        let mut transaction_guard = self.transactions.lock().await;
+        info!("Transactions lock acquired");
+
+        info!("Checking transactions of socket: {}", connection_socket);
+
+        match transaction_guard.entry(connection_socket.clone()) {
+            Entry::Occupied(mut entry) => {
+                let transaction = entry.get_mut();
+                if transaction.state() == transaction::TxState::Queuing {
+                    info!("Transaction map has an entry and it's state is Queuing");
+                    info!("Adding command {:?} to queue", command);
+                    transaction.queue(command.clone());
+                    return true;
+                }
+            }
+            Entry::Vacant(_) => {
+                info!("Transaction map is vacant");
+            }
+        }
+        false
+    }
+}
+
 impl CommandHandler<BoxedAsyncWrite> for MasterServer {
     fn execute(
         &self,
         command: RedisCommand,
+        connection_socket: SocketAddr,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, RespError>> + Send + '_>> {
         Box::pin(async move {
             use RedisCommand as RC;
@@ -169,39 +200,44 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
             match command {
                 RC::Ping => {
                     info!("Received PING command");
-                    let mut transaction_guard = self.transactions.lock().await;
-                    let connection_socket = self.connection_socket;
-
-                    match transaction_guard.entry(connection_socket.clone()) {
-                        Entry::Occupied(mut entry) => {
-                            let transaction = entry.get_mut();
-                            if transaction.state() == transaction::TxState::Queuing {
-                                transaction.queue(command);
-                                return Ok(frame_bytes!("QUEUED"));
-                            }
-                        }
-                        Entry::Vacant(_) => {}
+                    if self
+                        .check_and_queue_transaction(&command, connection_socket)
+                        .await
+                    {
+                        return Ok(frame_bytes!("QUEUED"));
                     }
                     Ok(frame_bytes!("PONG"))
                 }
-                RC::Echo(echo_string) => {
+                RC::Echo(ref echo_string) => {
+                    if self
+                        .check_and_queue_transaction(&command, connection_socket)
+                        .await
+                    {
+                        return Ok(frame_bytes!("QUEUED"));
+                    }
                     info!("Received ECHO command: {}", echo_string);
                     Ok(frame_bytes!(echo_string))
                 }
-                RC::Get(key) => {
+                RC::Get(ref key) => {
+                    if self
+                        .check_and_queue_transaction(&command, connection_socket)
+                        .await
+                    {
+                        return Ok(frame_bytes!("QUEUED"));
+                    }
                     info!("Received GET command for key: {}", key);
                     info!("Attempting to lock cache for GET");
                     let mut cache = self.cache.lock().await;
                     info!("Cache lock acquired for GET");
 
-                    match cache.get(&key).cloned() {
+                    match cache.get(key.as_str()).cloned() {
                         Some(entry) if !entry.is_expired() => {
                             info!("Key {} found and not expired", key);
                             Ok(entry.value.to_resp())
                         }
                         Some(_) => {
                             info!("Key {} expired, removing", key);
-                            cache.remove(&key); // Clean up expired key
+                            cache.remove(key.as_str()); // Clean up expired key
                             Ok(frame_bytes!(null))
                         }
                         None => {
@@ -210,13 +246,19 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         }
                     }
                 }
-                RC::Type(key) => {
+                RC::Type(ref key) => {
+                    if self
+                        .check_and_queue_transaction(&command, connection_socket)
+                        .await
+                    {
+                        return Ok(frame_bytes!("QUEUED"));
+                    }
                     info!("Received TYPE command for key: {}", key);
                     info!("Attempting to lock cache for GET");
                     let cache = self.cache.lock().await;
                     info!("Cache lock acquired for GET");
 
-                    match cache.get(&key).cloned() {
+                    match cache.get(key.as_str()).cloned() {
                         Some(entry) if !entry.is_expired() => {
                             info!("Key {} found and not expired", key);
                             let type_str = match &entry.value {
@@ -240,59 +282,65 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         }
                     }
                 }
-                RC::Set(command) => {
-                    info!("Received SET command for key: {}", command.key);
+                RC::Set(ref set_cmd) => {
+                    if self
+                        .check_and_queue_transaction(&command, connection_socket)
+                        .await
+                    {
+                        return Ok(frame_bytes!("QUEUED"));
+                    }
+                    info!("Received SET command for key: {}", set_cmd.key);
                     info!("Attempting to lock cache for SET");
                     let mut cache = self.cache.lock().await;
                     info!("Cache lock acquired for SET");
 
                     // Check conditions (NX/XX)
-                    let key_exists = cache.contains_key(&command.key);
+                    let key_exists = cache.contains_key(set_cmd.key.as_str());
                     info!("Key exists? {}", key_exists);
 
-                    if (matches!(command.condition, Some(SetCondition::NotExists)) && key_exists)
-                        || (matches!(command.condition, Some(SetCondition::Exists)) && !key_exists)
+                    if (matches!(set_cmd.condition, Some(SetCondition::NotExists)) && key_exists)
+                        || (matches!(set_cmd.condition, Some(SetCondition::Exists)) && !key_exists)
                     {
-                        info!("SET condition not met for key {}", command.key);
+                        info!("SET condition not met for key {}", set_cmd.key);
                         return Ok(frame_bytes!(null));
                     }
 
-                    let get_value = if command.get_old_value {
-                        let old = cache.get(&command.key).map(|v| v.value.clone());
-                        info!("Returning old value for key {}: {:?}", command.key, old);
+                    let get_value = if set_cmd.get_old_value {
+                        let old = cache.get(set_cmd.key.as_str()).map(|v| v.value.clone());
+                        info!("Returning old value for key {}: {:?}", set_cmd.key, old);
                         old
                     } else {
                         None
                     };
 
                     // Calculate expiry
-                    let expires_at = if let Some(ExpiryOption::KeepTtl) = command.expiry {
-                        let ttl = cache.get(&command.key).and_then(|e| e.expires_at);
-                        info!("Keeping TTL for key {}: {:?}", command.key, ttl);
+                    let expires_at = if let Some(ExpiryOption::KeepTtl) = set_cmd.expiry {
+                        let ttl = cache.get(set_cmd.key.as_str()).and_then(|e| e.expires_at);
+                        info!("Keeping TTL for key {}: {:?}", set_cmd.key, ttl);
                         ttl
                     } else {
-                        let ttl = command.calculate_expiry_time();
-                        info!("Calculated new TTL for key {}: {:?}", command.key, ttl);
+                        let ttl = set_cmd.calculate_expiry_time();
+                        info!("Calculated new TTL for key {}: {:?}", set_cmd.key, ttl);
                         ttl
                     };
 
-                    let frame_value = command.value.clone();
+                    let frame_value = set_cmd.value.clone();
                     let broadcast_cmd = frame_bytes!(array => [
                         frame!(bulk "SET"),
-                        frame!(bulk command.key.clone()),
+                        frame!(bulk set_cmd.key.clone()),
                         frame_value.clone()
                     ]);
 
                     // Set the value
                     cache.insert(
-                        command.key.clone(),
+                        set_cmd.key.clone(),
                         CacheEntry {
                             value: frame_value,
                             expires_at,
                         },
                     );
 
-                    info!("Inserted/updated key {}", command.key);
+                    info!("Inserted/updated key {}", set_cmd.key);
                     drop(cache);
                     info!("Released cache lock for SET");
 
@@ -314,7 +362,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         .await;
                     info!("Sent broadcast to replicas");
 
-                    if !command.get_old_value {
+                    if !set_cmd.get_old_value {
                         Ok(frame_bytes!("OK"))
                     } else {
                         match get_value {
@@ -323,18 +371,24 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         }
                     }
                 }
-                RC::Incr { key } => {
+                RC::Incr { ref key } => {
+                    if self
+                        .check_and_queue_transaction(&command, connection_socket)
+                        .await
+                    {
+                        return Ok(frame_bytes!("QUEUED"));
+                    }
                     info!("Received INCR command for key: {}", key);
                     info!("Attempting to lock cache for Incr");
                     let mut cache = self.cache.lock().await;
                     info!("Cache lock acquired for Incr");
 
-                    let key_exists = cache.contains_key(&key);
+                    let key_exists = cache.contains_key(key.as_str());
                     info!("Key exists? {}", key_exists);
 
                     let mut response = frame_bytes!(int 1);
 
-                    if let Some(entry) = cache.get_mut(&key) {
+                    if let Some(entry) = cache.get_mut(key.as_str()) {
                         match &entry.value {
                             Frame::BulkString(bytes) => {
                                 // Try to parse as integer
@@ -383,17 +437,33 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     parsed_id: _,
                     fields: _,
                 } => {
+                    if self
+                        .check_and_queue_transaction(&command, connection_socket)
+                        .await
+                    {
+                        return Ok(frame_bytes!("QUEUED"));
+                    }
                     info!("Received Xadd command (not handled here)");
                     // PSYNC is handled specially in `handle_client`, this is a fallback.
                     Err(RespError::InvalidStreamOperation)
                 }
-                RC::XRange { key, start, end } => {
+                RC::XRange {
+                    ref key,
+                    ref start,
+                    ref end,
+                } => {
+                    if self
+                        .check_and_queue_transaction(&command, connection_socket)
+                        .await
+                    {
+                        return Ok(frame_bytes!("QUEUED"));
+                    }
                     info!("Received XRange command for key: {}", key);
                     info!("Attempting to lock cache for XRANGE");
                     let cache = self.cache.lock().await;
                     info!("Cache lock acquired for XRANGE");
 
-                    if let Some(entry) = cache.get(&key) {
+                    if let Some(entry) = cache.get(key.as_str()) {
                         if let Frame::Stream(ref vec) = entry.value {
                             info!(
                                 "In XRANGE execution and for key {} and the Stream is : {:?}",
@@ -405,7 +475,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                     XrangeStreamdId::Literal(end),
                                 ) => vec
                                     .iter()
-                                    .filter(|stream| stream.id >= start && stream.id <= end)
+                                    .filter(|stream| stream.id >= *start && stream.id <= *end)
                                     .collect::<Vec<&StreamEntry>>(),
                                 (
                                     XrangeStreamdId::AutoSequence { ms_time: start },
@@ -413,7 +483,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                 ) => vec
                                     .iter()
                                     .filter(|stream| {
-                                        stream.id.ms_time >= start && stream.id.ms_time <= end
+                                        stream.id.ms_time >= *start && stream.id.ms_time <= *end
                                     })
                                     .collect::<Vec<&StreamEntry>>(),
                                 (
@@ -421,22 +491,22 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                     XrangeStreamdId::AutoSequence { ms_time: end },
                                 ) => vec
                                     .iter()
-                                    .filter(|stream| stream.id.ms_time <= end)
+                                    .filter(|stream| stream.id.ms_time <= *end)
                                     .collect::<Vec<&StreamEntry>>(),
                                 (XrangeStreamdId::AutoStart, XrangeStreamdId::Literal(end)) => vec
                                     .iter()
-                                    .filter(|stream| stream.id <= end)
+                                    .filter(|stream| stream.id <= *end)
                                     .collect::<Vec<&StreamEntry>>(),
                                 (
                                     XrangeStreamdId::AutoSequence { ms_time: start },
                                     XrangeStreamdId::AutoEnd,
                                 ) => vec
                                     .iter()
-                                    .filter(|stream| stream.id.ms_time >= start)
+                                    .filter(|stream| stream.id.ms_time >= *start)
                                     .collect::<Vec<&StreamEntry>>(),
                                 (XrangeStreamdId::Literal(start), XrangeStreamdId::AutoEnd) => vec
                                     .iter()
-                                    .filter(|stream| stream.id >= start)
+                                    .filter(|stream| stream.id >= *start)
                                     .collect::<Vec<&StreamEntry>>(),
                                 (_, _) => unreachable!("This is logically impossible"),
                             };
@@ -466,10 +536,16 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     Ok(frame_bytes!(error "ERR"))
                 }
                 RC::XRead {
-                    block_param,
-                    keys,
-                    stream_ids,
+                    ref block_param,
+                    ref keys,
+                    ref stream_ids,
                 } => {
+                    if self
+                        .check_and_queue_transaction(&command, connection_socket)
+                        .await
+                    {
+                        return Ok(frame_bytes!("QUEUED"));
+                    }
                     info!("Received XRead command for keys: {:?}", keys);
 
                     info!("Attempting to lock cache for XREAD");
@@ -504,14 +580,14 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     drop(cache);
 
                     if let Some(timeout_ms) = block_param {
-                        if timeout_ms == 0 {
+                        if *timeout_ms == 0 {
                             info!("Blocking XREAD indefinitely until we recieve a notification");
                             self.xadd_notifier.notified().await;
                             info!("XREAD unblocked by notification")
                         } else {
                             info!("Blocking XREAD with timeout: {}ms", timeout_ms);
                             // Wait for notification or timeout
-                            let timeout_duration = Duration::from_millis(timeout_ms);
+                            let timeout_duration = Duration::from_millis(*timeout_ms);
                             let timeout_result = tokio::time::timeout(
                                 timeout_duration,
                                 self.xadd_notifier.notified(),
@@ -582,7 +658,13 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     // Final response is an array of streams
                     Ok(frame_bytes!(array => stream_responses))
                 }
-                RC::ConfigGet(s) => {
+                RC::ConfigGet(ref s) => {
+                    if self
+                        .check_and_queue_transaction(&command, connection_socket)
+                        .await
+                    {
+                        return Ok(frame_bytes!("QUEUED"));
+                    }
                     info!("Received CONFIG GET for key: {}", s);
                     match s.as_str() {
                         "dir" => Ok(frame_bytes!(array => [
@@ -596,7 +678,13 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         _ => Ok(frame_bytes!(array => [])),
                     }
                 }
-                RC::Keys(query) => {
+                RC::Keys(ref query) => {
+                    if self
+                        .check_and_queue_transaction(&command, connection_socket)
+                        .await
+                    {
+                        return Ok(frame_bytes!("QUEUED"));
+                    }
                     info!("Received KEYS command with pattern: {}", query);
                     let query = query.replace('*', ".*");
                     info!("Translated query regex: {}", query);
@@ -618,7 +706,13 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
 
                     Ok(Frame::Array(matching_keys).to_resp())
                 }
-                RC::Info(_sub_command) => {
+                RC::Info(ref _sub_command) => {
+                    if self
+                        .check_and_queue_transaction(&command, connection_socket)
+                        .await
+                    {
+                        return Ok(frame_bytes!("QUEUED"));
+                    }
                     info!("Received INFO command");
                     info!("Attempting to lock state for INFO");
                     let state = self.state.lock().await;
@@ -632,7 +726,13 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
 
                     Ok(frame_bytes!(bulk info_response))
                 }
-                RC::ReplConf(_) => {
+                RC::ReplConf(ref _args) => {
+                    if self
+                        .check_and_queue_transaction(&command, connection_socket)
+                        .await
+                    {
+                        return Ok(frame_bytes!("QUEUED"));
+                    }
                     info!("Received REPLCONF command");
                     // Master receives ACKs, but doesn't send a response to them.
                     // Other REPLCONFs are part of handshake.
@@ -648,8 +748,39 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     info!("Starting transaction");
                     let transactions = self.transactions.as_ref();
                     let mut transactions_guard = transactions.lock().await;
-                    transactions_guard.insert(self.connection_socket, Transaction::multi());
+                    transactions_guard.insert(connection_socket, Transaction::multi());
                     Ok(frame_bytes!("OK"))
+                }
+                RC::Discard => {
+                    info!("Received Discard command");
+                    let transactions = self.transactions.as_ref();
+                    let mut transactions_guard = transactions.lock().await;
+                    let mut response = Err(RespError::DiscardWithoutMulti);
+                    match transactions_guard.entry(connection_socket) {
+                        Entry::Occupied(mut entry) => {
+                            // Key does exist meaning MULTI has at least executed once
+                            let transaction = entry.get_mut();
+                            match transaction.state() {
+                                transaction::TxState::Idle => {
+                                    // response should be empty array
+                                }
+                                transaction::TxState::Queuing => {
+                                    if transaction.is_empty_queue() {
+                                        response = Ok(frame_bytes!("OK"))
+                                    } else {
+                                        // execute the commands
+                                        transaction.discard();
+                                    }
+                                }
+                                transaction::TxState::Discarded => unreachable!(),
+                            }
+                        }
+                        Entry::Vacant(_) => {
+                            // Key doesn't exist meaning there is no transaction started and I should
+                            // return the default response which is the DiscardWithoutMulti error
+                        }
+                    }
+                    response
                 }
                 RC::Exec => {
                     info!("Received Multi command");
@@ -657,7 +788,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     let transactions = self.transactions.as_ref();
                     let mut transactions_guard = transactions.lock().await;
                     let mut response = Err(RespError::ExecWithoutMulti);
-                    match transactions_guard.entry(self.connection_socket) {
+                    match transactions_guard.entry(connection_socket) {
                         Entry::Occupied(mut entry) => {
                             // Key does exist meaning MULTI has at least executed once
                             let transaction = entry.get_mut();
@@ -673,7 +804,8 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                         let mut arr =
                                             Vec::with_capacity(transaction.commands.len());
                                         for (i, cmd) in transaction.commands.iter().enumerate() {
-                                            match self.execute(cmd.clone()).await {
+                                            match self.execute(cmd.clone(), connection_socket).await
+                                            {
                                                 Ok(bytes) => arr[i] = bytes,
                                                 Err(error) => arr[i] = error.to_resp(),
                                             }
@@ -695,7 +827,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     }
 
                     info!("Clearning transaction after EXEC");
-                    transactions_guard.remove(&self.connection_socket);
+                    transactions_guard.remove(&connection_socket);
                     response
                 }
                 RC::Wait((no_replicas, time_in_ms)) => {

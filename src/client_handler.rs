@@ -329,7 +329,7 @@ async fn handle_generic_command(
         info!("Attempting to lock server for execute()");
         let server_instance = server.lock().await;
         info!("Server lock acquired for execute()");
-        match server_instance.execute(command).await {
+        match server_instance.execute(command, socket_addr).await {
             Ok(bytes) => bytes,
             Err(error) => error.to_resp(),
         }

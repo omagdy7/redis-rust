@@ -92,14 +92,27 @@ impl RedisServer {
         Ok(Some(redis_server))
     }
 
-    pub async fn execute(&self, command: RedisCommand) -> Result<Vec<u8>, RespError> {
+    pub async fn execute(
+        &self,
+        command: RedisCommand,
+        connection_socket: SocketAddr,
+    ) -> Result<Vec<u8>, RespError> {
         match self {
             RedisServer::Master(master) => {
-                <MasterServer as CommandHandler<BoxedAsyncWrite>>::execute(master, command).await
+                <MasterServer as CommandHandler<BoxedAsyncWrite>>::execute(
+                    master,
+                    command,
+                    connection_socket,
+                )
+                .await
             }
             RedisServer::Slave(slave) => {
-                <SlaveServer as CommandHandler<tokio::net::TcpStream>>::execute(slave, command)
-                    .await
+                <SlaveServer as CommandHandler<tokio::net::TcpStream>>::execute(
+                    slave,
+                    command,
+                    connection_socket,
+                )
+                .await
             }
         }
     }
@@ -157,8 +170,10 @@ impl RedisServer {
         }
     }
 
-    pub fn set_connection_socket(&mut self) {
-        if let Self::Master(_m) = self {}
+    pub fn set_connection_socket(&mut self, socket: SocketAddr) {
+        if let Self::Master(m) = self {
+            m.connection_socket = socket;
+        }
     }
 
     pub fn cache(&self) -> &SharedMut<Cache> {

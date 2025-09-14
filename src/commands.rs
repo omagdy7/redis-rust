@@ -123,6 +123,7 @@ pub enum RedisCommand {
     Wait((String, String)),
     Multi,
     Exec,
+    Discard,
     Incr {
         key: String,
     },
@@ -471,6 +472,14 @@ impl RedisCommand {
         }
     }
 
+    fn parse_discard_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        if args.next().is_none() {
+            Self::Discard
+        } else {
+            Self::Invalid
+        }
+    }
+
     fn parse_psync_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
         let repl_id_frame = Self::require_next_arg(&mut args);
         let repl_offset_frame = Self::require_next_arg(&mut args);
@@ -510,6 +519,7 @@ impl RedisCommand {
             "WAIT" => Self::parse_wait_command(args),
             "MULTI" => Self::parse_multi_command(args),
             "EXEC" => Self::parse_exec_command(args),
+            "DISCARD" => Self::parse_discard_command(args),
             "PSYNC" => Self::parse_psync_command(args),
             "INCR" => Self::parse_incr_command(args),
             "SET" => Self::parse_set_command(args),
