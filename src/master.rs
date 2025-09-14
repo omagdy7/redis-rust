@@ -762,12 +762,13 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                             let transaction = entry.get_mut();
                             match transaction.state() {
                                 transaction::TxState::Idle => {
-                                    // response should be empty array
+                                    unreachable!()
                                 }
                                 transaction::TxState::Queuing => {
                                     response = Ok(frame_bytes!("OK"));
                                     if !transaction.is_empty_queue() {
                                         transaction.discard();
+                                        transactions_guard.remove(&connection_socket);
                                     }
                                 }
                                 transaction::TxState::Discarded => unreachable!(),
