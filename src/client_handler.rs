@@ -4,6 +4,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ReadHalf},
     net::TcpStream,
     sync::Notify,
+    time::{Duration, timeout},
 };
 use tracing::{error, info};
 
@@ -13,8 +14,12 @@ use crate::parser::parse;
 use crate::server::RedisServer;
 use crate::shared_cache::Cache;
 use crate::stream::{StreamEntry, StreamId};
-use crate::types::{BoxedAsyncWrite, ReplicationMsg, ServerState, SharedMut, resolve_stream_id};
+use crate::types::{
+    BlockedClient, BlockingQueue, BoxedAsyncWrite, ReplicationMsg, ServerState, SharedMut,
+    resolve_stream_id,
+};
 use crate::{commands::RedisCommand, stream::XaddStreamId};
+use bytes::Bytes;
 
 use crate::rdb_utils::send_empty_rdb;
 
@@ -28,6 +33,7 @@ pub async fn handle_client(
     acks_map: Option<SharedMut<HashMap<SocketAddr, usize>>>,
     ack_notifier: Option<Arc<Notify>>,
     xadd_notifier: Option<Arc<Notify>>,
+    blocking_queue: Option<SharedMut<BlockingQueue>>,
 ) -> Result<()> {
     info!("Starting handle_client for {}", socket_addr);
 
@@ -87,6 +93,21 @@ pub async fn handle_client(
                 .await
                 {
                     error!("Error handling XADD: {}", e);
+                    return Err(e);
+                }
+            }
+            RedisCommand::Blpop { key, time_sec } => {
+                if let Err(e) = handle_blpop(
+                    &cache,
+                    &writer,
+                    socket_addr,
+                    key,
+                    time_sec,
+                    blocking_queue.as_ref(),
+                )
+                .await
+                {
+                    error!("Error handling BLPOP: {}", e);
                     return Err(e);
                 }
             }
@@ -257,6 +278,119 @@ async fn handle_xadd(
     writer.lock().await.flush().await?;
 
     Ok(())
+}
+
+// helper function for BLPOP handling
+async fn handle_blpop(
+    cache: &SharedMut<Cache>,
+    writer: &SharedMut<BoxedAsyncWrite>,
+    socket_addr: SocketAddr,
+    key: String,
+    time_sec: f64,
+    blocking_queue: Option<&SharedMut<BlockingQueue>>,
+) -> Result<()> {
+    info!(
+        "Received BLPOP command for key: {} with timeout: {}",
+        key, time_sec
+    );
+
+    loop {
+        // Check if the list has elements
+        {
+            let cache_guard = cache.lock().await;
+            if let Some(entry) = cache_guard.get(&key) {
+                if let Frame::List(arr) = &entry.value {
+                    if !arr.is_empty() {
+                        // List has elements, pop the first one
+                        drop(cache_guard); // Release read lock
+
+                        // Acquire write lock to modify
+                        let mut cache_write = cache.lock().await;
+                        if let Some(entry) = cache_write.get_mut(&key) {
+                            if let Frame::List(arr) = &mut entry.value {
+                                if !arr.is_empty() {
+                                    let popped_element = arr.remove(0);
+                                    if arr.is_empty() {
+                                        // Remove the key if list is now empty
+                                        cache_write.remove(&key);
+                                    }
+
+                                    // Return the result
+                                    let response =
+                                        frame_bytes!(list => [frame!(bulk key), popped_element]);
+                                    writer.lock().await.write_all(&response).await?;
+                                    writer.lock().await.flush().await?;
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // List is empty, register in blocking queue
+        if let Some(queue) = blocking_queue {
+            info!("BLPOP registering client {} for key: {}", socket_addr, key);
+            let blocked_client = BlockedClient::new(socket_addr, writer.clone());
+            let client_notifier = blocked_client.notifier.clone();
+
+            {
+                let mut queue_guard = queue.lock().await;
+                queue_guard.enqueue(key.clone(), blocked_client);
+            }
+
+            // Wait for notification from the blocking queue with timeout
+            info!(
+                "BLPOP waiting for notification for key: {} with timeout: {}",
+                key, time_sec
+            );
+
+            let wait_result = if time_sec == 0.0 {
+                // Indefinite wait
+                client_notifier.notified().await;
+                Ok(())
+            } else {
+                // Wait with timeout
+                timeout(
+                    Duration::from_secs_f64(time_sec),
+                    client_notifier.notified(),
+                )
+                .await
+            };
+
+            match wait_result {
+                Ok(_) => {
+                    // Notification received, check again
+                    info!(
+                        "BLPOP woke up by notification, checking again for key: {}",
+                        key
+                    );
+                }
+                Err(_) => {
+                    // Timeout occurred, remove client from queue and return null array
+                    info!(
+                        "BLPOP timeout occurred for key: {}, returning null array",
+                        key
+                    );
+                    {
+                        let mut queue_guard = queue.lock().await;
+                        queue_guard.remove_client(socket_addr);
+                    }
+                    let response = frame_bytes!(null_list);
+                    writer.lock().await.write_all(&response).await?;
+                    writer.lock().await.flush().await?;
+                    return Ok(());
+                }
+            }
+        } else {
+            // No blocking queue available, return null array
+            let response = frame_bytes!(null_list);
+            writer.lock().await.write_all(&response).await?;
+            writer.lock().await.flush().await?;
+            return Ok(());
+        }
+    }
 }
 
 // helper function for REPLCONF ACK handling

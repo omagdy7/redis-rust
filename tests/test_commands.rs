@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 use tokio;
@@ -156,7 +157,7 @@ mod command_execution_tests {
         let mut server = RedisServer::new_master();
         server.set_cache(cache);
 
-        server.execute(command).await.unwrap()
+        server.execute(command, "127.0.0.1:12345".parse().unwrap()).await.unwrap()
     }
 
     #[tokio::test]
@@ -274,6 +275,14 @@ mod command_execution_tests {
         // GET on an expired key should return nil and trigger cleanup
         assert_eq!(run_command(&cache, &["GET", "mykey"]).await, b"$-1\r\n");
         assert!(get_from_cache(&cache, "mykey").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_blpop_timeout() {
+        let cache = new_cache();
+        // Test BLPOP with timeout on non-existent key should return null
+        let result = run_command(&cache, &["BLPOP", "nonexistent", "0.001"]).await;
+        assert_eq!(result, b"*-1\r\n"); // Null array response
     }
 
     #[tokio::test]

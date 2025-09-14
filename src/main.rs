@@ -46,16 +46,17 @@ async fn main() -> std::io::Result<()> {
     spawn_cleanup_task(server.cache().clone());
     let server = Arc::new(Mutex::new(server));
 
-    let (acks_for_handler, notifier_for_handler, xadd_notifier_handler) = {
+    let (acks_for_handler, notifier_for_handler, xadd_notifier_handler, blocking_queue_handler) = {
         let server_guard = server.lock().await;
         if let RedisServer::Master(master) = &*server_guard {
             (
                 Some(master.acks.clone()),
                 Some(master.ack_notifier.clone()),
                 Some(master.xadd_notifier.clone()),
+                Some(master.blocking_queue.clone()),
             )
         } else {
-            (None, None, None)
+            (None, None, None, None)
         }
     };
 
@@ -76,6 +77,11 @@ async fn main() -> std::io::Result<()> {
                 };
 
                 let xadd_notifier_handler_clone = match xadd_notifier_handler {
+                    Some(ref inner) => Some(Arc::clone(inner)),
+                    None => None,
+                };
+
+                let blocking_queue_handler_clone = match blocking_queue_handler {
                     Some(ref inner) => Some(Arc::clone(inner)),
                     None => None,
                 };
@@ -106,6 +112,7 @@ async fn main() -> std::io::Result<()> {
                         acks_for_handler_clone,
                         notifier_for_handler_clone,
                         xadd_notifier_handler_clone,
+                        blocking_queue_handler_clone,
                     )
                     .await
                     {

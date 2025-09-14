@@ -34,6 +34,8 @@ pub struct MasterServer {
     pub acks: SharedMut<HashMap<SocketAddr, usize>>,
     pub ack_notifier: Arc<Notify>,
     pub xadd_notifier: Arc<Notify>,
+    pub list_notifier: Arc<Notify>,
+    pub blocking_queue: SharedMut<BlockingQueue>,
     pub transactions: SharedMut<HashMap<SocketAddr, Transaction>>,
 }
 
@@ -56,6 +58,8 @@ impl MasterServer {
         let cache = Arc::new(Mutex::new(HashMap::new()));
         let ack_notifier = Arc::new(Notify::new());
         let xadd_notifier = Arc::new(Notify::new());
+        let list_notifier = Arc::new(Notify::new());
+        let blocking_queue = Arc::new(Mutex::new(BlockingQueue::new()));
         let acks = Arc::new(Mutex::new(HashMap::new()));
         let transactions = Arc::new(Mutex::new(HashMap::new()));
 
@@ -110,6 +114,8 @@ impl MasterServer {
             acks,
             ack_notifier,
             xadd_notifier,
+            list_notifier,
+            blocking_queue,
             transactions,
         }
     }
@@ -758,19 +764,30 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         expires_at: None,
                     });
 
-                    match &mut entry.value {
-                        Frame::List(arr) => {
-                            // Convert Vec<String> into Frames and append
-                            arr.extend(elements.into_iter().map(|s| frame!(bulk s)));
+                     match &mut entry.value {
+                         Frame::List(arr) => {
+                             // Convert Vec<String> into Frames and append
+                             arr.extend(elements.into_iter().map(|s| frame!(bulk s)));
 
-                            let new_len = arr.len();
-                            return Ok(frame_bytes!(int new_len));
-                        }
-                        _ => {
-                            // WRONGTYPE error if key exists but isn’t a list
-                            return Err(RespError::WrongType);
-                        }
-                    }
+                             let new_len = arr.len();
+
+                             // Notify any waiting BLPOP commands
+                             drop(cache); // Release lock before notifying
+                             // Check if there are clients waiting for this key
+                              let mut queue_guard = self.blocking_queue.lock().await;
+                              if let Some(waiting_client) = queue_guard.dequeue(&key) {
+                                  info!("Notifying waiting BLPOP client for key: {}", key);
+                                  // The client will check the list again and pop the element
+                                  waiting_client.notifier.notify_waiters();
+                              }
+
+                             return Ok(frame_bytes!(int new_len));
+                         }
+                         _ => {
+                             // WRONGTYPE error if key exists but isn’t a list
+                             return Err(RespError::WrongType);
+                         }
+                     }
                 }
                 RC::Lpush { key, elements } => {
                     info!(
@@ -787,24 +804,35 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         expires_at: None,
                     });
 
-                    match &mut entry.value {
-                        Frame::List(arr) => {
-                            // Convert Vec<String> into BulkString frames
-                            let mut new_frames: Vec<Frame> =
-                                elements.into_iter().map(|s| frame!(bulk s)).rev().collect();
+                     match &mut entry.value {
+                         Frame::List(arr) => {
+                             // Convert Vec<String> into BulkString frames
+                             let mut new_frames: Vec<Frame> =
+                                 elements.into_iter().map(|s| frame!(bulk s)).rev().collect();
 
-                            // Prepend by inserting at the front
-                            new_frames.append(arr); // moves arr to the back of new_frames
-                            *arr = new_frames;
+                             // Prepend by inserting at the front
+                             new_frames.append(arr); // moves arr to the back of new_frames
+                             *arr = new_frames;
 
-                            let new_len = arr.len();
-                            return Ok(frame_bytes!(int new_len));
-                        }
-                        _ => {
-                            // WRONGTYPE error if key exists but isn’t a list
-                            return Err(RespError::WrongType);
-                        }
-                    }
+                             let new_len = arr.len();
+
+                             // Notify any waiting BLPOP commands
+                             drop(cache); // Release lock before notifying
+                             // Check if there are clients waiting for this key
+                              let mut queue_guard = self.blocking_queue.lock().await;
+                              if let Some(waiting_client) = queue_guard.dequeue(&key) {
+                                  info!("Notifying waiting BLPOP client for key: {}", key);
+                                  // The client will check the list again and pop the element
+                                  waiting_client.notifier.notify_waiters();
+                              }
+
+                             return Ok(frame_bytes!(int new_len));
+                         }
+                         _ => {
+                             // WRONGTYPE error if key exists but isn’t a list
+                             return Err(RespError::WrongType);
+                         }
+                     }
                 }
                 RC::Lrange {
                     key,
@@ -925,7 +953,11 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         Entry::Vacant(_) => Ok(frame_bytes!(null)),
                     }
                 }
-                RC::Blpop { key, time_sec } => todo!(),
+                RC::Blpop { key: _, time_sec: _ } => {
+                    // BLPOP is handled specially in client_handler.rs for blocking behavior
+                    // This should not be reached in normal operation
+                    Ok(frame_bytes!(null_list))
+                }
                 RC::Multi => {
                     info!("Received Multi command");
                     info!("Starting transaction");

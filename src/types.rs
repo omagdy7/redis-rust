@@ -1,9 +1,10 @@
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::{future::Future, net::SocketAddr, sync::Arc};
 
 use tokio::io::AsyncWrite;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use crate::commands::RedisCommand;
 use crate::error::RespError;
@@ -54,6 +55,77 @@ pub enum ReplicationMsg {
     Broadcast(Vec<u8>),
     AddReplica(SocketAddr, SharedMut<BoxedAsyncWrite>),
     RemoveReplica(SocketAddr),
+}
+
+/// Represents a client waiting for a BLPOP operation
+pub struct BlockedClient {
+    pub socket_addr: SocketAddr,
+    pub writer: SharedMut<BoxedAsyncWrite>,
+    pub notifier: Arc<Notify>,
+}
+
+impl std::fmt::Debug for BlockedClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlockedClient")
+            .field("socket_addr", &self.socket_addr)
+            .field("writer", &"<BoxedAsyncWrite>")
+            .field("notifier", &self.notifier)
+            .finish()
+    }
+}
+
+impl BlockedClient {
+    pub fn new(socket_addr: SocketAddr, writer: SharedMut<BoxedAsyncWrite>) -> Self {
+        Self {
+            socket_addr,
+            writer,
+            notifier: Arc::new(Notify::new()),
+        }
+    }
+}
+
+/// Blocking queue for managing clients waiting for BLPOP operations
+#[derive(Debug)]
+pub struct BlockingQueue {
+    /// Map of key -> queue of waiting clients (FIFO order)
+    pub queues: std::collections::HashMap<String, VecDeque<BlockedClient>>,
+}
+
+impl BlockingQueue {
+    pub fn new() -> Self {
+        Self {
+            queues: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Add a client to the waiting queue for a specific key
+    pub fn enqueue(&mut self, key: String, client: BlockedClient) {
+        self.queues.entry(key).or_insert_with(VecDeque::new).push_back(client);
+    }
+
+    /// Remove and return the first client waiting for a specific key
+    pub fn dequeue(&mut self, key: &str) -> Option<BlockedClient> {
+        self.queues.get_mut(key).and_then(|queue| queue.pop_front())
+    }
+
+    /// Check if there are any clients waiting for a specific key
+    pub fn has_waiting_clients(&self, key: &str) -> bool {
+        self.queues.get(key).map_or(false, |queue| !queue.is_empty())
+    }
+
+    /// Get the number of clients waiting for a specific key
+    pub fn waiting_count(&self, key: &str) -> usize {
+        self.queues.get(key).map_or(0, |queue| queue.len())
+    }
+
+    /// Remove a specific client from all queues (useful for cleanup when client disconnects)
+    pub fn remove_client(&mut self, socket_addr: SocketAddr) {
+        for queue in self.queues.values_mut() {
+            queue.retain(|client| client.socket_addr != socket_addr);
+        }
+        // Clean up empty queues
+        self.queues.retain(|_, queue| !queue.is_empty());
+    }
 }
 
 // function for debugging purposes
