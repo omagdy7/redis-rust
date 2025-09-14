@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::{future::Future, net::SocketAddr, sync::Arc};
@@ -57,6 +58,94 @@ pub enum ReplicationMsg {
     RemoveReplica(SocketAddr),
 }
 
+/// Types of notifiers used in the system
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum NotifierType {
+    Ack,          // For replication acknowledgments (WAIT command)
+    XAdd,         // For stream XADD operations (XREAD blocking)
+    List(String), // For list operations (BLPOP blocking) - key-specific
+}
+
+/// Centralized manager for all notifiers in the system
+#[derive(Debug, Clone)]
+pub struct NotificationManager {
+    notifiers: SharedMut<HashMap<NotifierType, Arc<Notify>>>,
+}
+
+impl NotificationManager {
+    pub fn new() -> Self {
+        let mut notifiers = HashMap::new();
+        notifiers.insert(NotifierType::Ack, Arc::new(Notify::new()));
+        notifiers.insert(NotifierType::XAdd, Arc::new(Notify::new()));
+        // Note: List notifiers are created on-demand for specific keys
+
+        Self {
+            notifiers: Arc::new(Mutex::new(notifiers)),
+        }
+    }
+
+    /// Get a notifier by type
+    pub async fn get_notifier(&self, notifier_type: NotifierType) -> Arc<Notify> {
+        let notifiers = self.notifiers.lock().await;
+        notifiers.get(&notifier_type).unwrap().clone()
+    }
+
+    /// Notify all waiters for a specific notifier type
+    pub async fn notify(&self, notifier_type: NotifierType) {
+        let notifier = self.get_notifier(notifier_type).await;
+        notifier.notify_waiters();
+    }
+
+    /// Wait for notification on a specific notifier type
+    pub async fn wait_for(&self, notifier_type: NotifierType) {
+        let notifier = self.get_notifier(notifier_type).await;
+        notifier.notified().await;
+    }
+
+    /// Add a new notifier type dynamically
+    pub async fn add_notifier(&self, notifier_type: NotifierType) {
+        let mut notifiers = self.notifiers.lock().await;
+        notifiers
+            .entry(notifier_type)
+            .or_insert_with(|| Arc::new(Notify::new()));
+    }
+
+    /// Remove a notifier type
+    pub async fn remove_notifier(&self, notifier_type: NotifierType) {
+        let mut notifiers = self.notifiers.lock().await;
+        notifiers.remove(&notifier_type);
+    }
+
+    /// Check if a notifier type exists
+    pub async fn has_notifier(&self, notifier_type: NotifierType) -> bool {
+        let notifiers = self.notifiers.lock().await;
+        notifiers.contains_key(&notifier_type)
+    }
+
+    /// Get or create a list notifier for a specific key
+    pub async fn get_list_notifier(&self, key: &str) -> Arc<Notify> {
+        let notifier_type = NotifierType::List(key.to_string());
+        let mut notifiers = self.notifiers.lock().await;
+
+        notifiers
+            .entry(notifier_type)
+            .or_insert_with(|| Arc::new(Notify::new()))
+            .clone()
+    }
+
+    /// Notify all waiters for a specific list key
+    pub async fn notify_list(&self, key: &str) {
+        let notifier = self.get_list_notifier(key).await;
+        notifier.notify_waiters();
+    }
+}
+
+impl Default for NotificationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Represents a client waiting for a BLPOP operation
 pub struct BlockedClient {
     pub socket_addr: SocketAddr,
@@ -100,7 +189,10 @@ impl BlockingQueue {
 
     /// Add a client to the waiting queue for a specific key
     pub fn enqueue(&mut self, key: String, client: BlockedClient) {
-        self.queues.entry(key).or_insert_with(VecDeque::new).push_back(client);
+        self.queues
+            .entry(key)
+            .or_insert_with(VecDeque::new)
+            .push_back(client);
     }
 
     /// Remove and return the first client waiting for a specific key
@@ -110,7 +202,9 @@ impl BlockingQueue {
 
     /// Check if there are any clients waiting for a specific key
     pub fn has_waiting_clients(&self, key: &str) -> bool {
-        self.queues.get(key).map_or(false, |queue| !queue.is_empty())
+        self.queues
+            .get(key)
+            .map_or(false, |queue| !queue.is_empty())
     }
 
     /// Get the number of clients waiting for a specific key

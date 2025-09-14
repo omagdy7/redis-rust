@@ -46,17 +46,16 @@ async fn main() -> std::io::Result<()> {
     spawn_cleanup_task(server.cache().clone());
     let server = Arc::new(Mutex::new(server));
 
-    let (acks_for_handler, notifier_for_handler, xadd_notifier_handler, blocking_queue_handler) = {
+    let (acks_for_handler, notification_manager_handler, blocking_queue_handler) = {
         let server_guard = server.lock().await;
         if let RedisServer::Master(master) = &*server_guard {
             (
                 Some(master.acks.clone()),
-                Some(master.ack_notifier.clone()),
-                Some(master.xadd_notifier.clone()),
+                Some(master.notification_manager.clone()),
                 Some(master.blocking_queue.clone()),
             )
         } else {
-            (None, None, None, None)
+            (None, None, None)
         }
     };
 
@@ -71,13 +70,8 @@ async fn main() -> std::io::Result<()> {
                     None => None,
                 };
 
-                let notifier_for_handler_clone = match notifier_for_handler {
-                    Some(ref inner) => Some(Arc::clone(inner)),
-                    None => None,
-                };
-
-                let xadd_notifier_handler_clone = match xadd_notifier_handler {
-                    Some(ref inner) => Some(Arc::clone(inner)),
+                let notification_manager_handler_clone = match notification_manager_handler {
+                    Some(ref inner) => Some(inner.clone()),
                     None => None,
                 };
 
@@ -109,9 +103,8 @@ async fn main() -> std::io::Result<()> {
                         server_clone,
                         role,
                         cache_clone,
+                        notification_manager_handler_clone,
                         acks_for_handler_clone,
-                        notifier_for_handler_clone,
-                        xadd_notifier_handler_clone,
                         blocking_queue_handler_clone,
                     )
                     .await

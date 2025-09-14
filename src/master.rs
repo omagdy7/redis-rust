@@ -9,7 +9,7 @@ use std::{
 };
 use tokio::{
     io::AsyncWriteExt,
-    sync::{Mutex, Notify, mpsc::Sender},
+    sync::{Mutex, mpsc::Sender},
     time::Duration,
 };
 use tracing::{error, info};
@@ -23,6 +23,7 @@ use crate::{
 };
 use crate::{error::RespError, transaction};
 use crate::{frame::Frame, transaction::TxState};
+use crate::types::{NotificationManager, NotifierType};
 
 #[derive(Debug, Clone)]
 pub struct MasterServer {
@@ -32,9 +33,7 @@ pub struct MasterServer {
     pub replication_msg_sender: Sender<ReplicationMsg>, // channel to send all that concerns replicaion nodes
     pub state: SharedMut<MasterState>,
     pub acks: SharedMut<HashMap<SocketAddr, usize>>,
-    pub ack_notifier: Arc<Notify>,
-    pub xadd_notifier: Arc<Notify>,
-    pub list_notifier: Arc<Notify>,
+    pub notification_manager: NotificationManager,
     pub blocking_queue: SharedMut<BlockingQueue>,
     pub transactions: SharedMut<HashMap<SocketAddr, Transaction>>,
 }
@@ -56,9 +55,7 @@ impl MasterServer {
         let connection_socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 420);
 
         let cache = Arc::new(Mutex::new(HashMap::new()));
-        let ack_notifier = Arc::new(Notify::new());
-        let xadd_notifier = Arc::new(Notify::new());
-        let list_notifier = Arc::new(Notify::new());
+        let notification_manager = NotificationManager::new();
         let blocking_queue = Arc::new(Mutex::new(BlockingQueue::new()));
         let acks = Arc::new(Mutex::new(HashMap::new()));
         let transactions = Arc::new(Mutex::new(HashMap::new()));
@@ -112,9 +109,7 @@ impl MasterServer {
             cache,
             connection_socket,
             acks,
-            ack_notifier,
-            xadd_notifier,
-            list_notifier,
+            notification_manager,
             blocking_queue,
             transactions,
         }
@@ -588,15 +583,16 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     if let Some(timeout_ms) = block_param {
                         if *timeout_ms == 0 {
                             info!("Blocking XREAD indefinitely until we recieve a notification");
-                            self.xadd_notifier.notified().await;
+                            self.notification_manager.wait_for(NotifierType::XAdd).await;
                             info!("XREAD unblocked by notification")
                         } else {
                             info!("Blocking XREAD with timeout: {}ms", timeout_ms);
                             // Wait for notification or timeout
                             let timeout_duration = Duration::from_millis(*timeout_ms);
+                            let xadd_notifier = self.notification_manager.get_notifier(NotifierType::XAdd).await;
                             let timeout_result = tokio::time::timeout(
                                 timeout_duration,
-                                self.xadd_notifier.notified(),
+                                xadd_notifier.notified(),
                             )
                             .await;
 
@@ -767,21 +763,18 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                      match &mut entry.value {
                          Frame::List(arr) => {
                              // Convert Vec<String> into Frames and append
-                             arr.extend(elements.into_iter().map(|s| frame!(bulk s)));
+                              arr.extend(elements.into_iter().map(|s| frame!(bulk s)));
 
-                             let new_len = arr.len();
+                              let new_len = arr.len();
 
-                             // Notify any waiting BLPOP commands
-                             drop(cache); // Release lock before notifying
-                             // Check if there are clients waiting for this key
-                              let mut queue_guard = self.blocking_queue.lock().await;
-                              if let Some(waiting_client) = queue_guard.dequeue(&key) {
-                                  info!("Notifying waiting BLPOP client for key: {}", key);
-                                  // The client will check the list again and pop the element
-                                  waiting_client.notifier.notify_waiters();
-                              }
+                              // Notify any waiting BLPOP commands
+                              drop(cache); // Release lock before notifying
+                              info!("Notifying waiting BLPOP clients for key: {}", key);
+                               if let Some(blocked_client) = self.blocking_queue.lock().await.dequeue(&key) {
+                                   blocked_client.notifier.notify_waiters();
+                               }
 
-                             return Ok(frame_bytes!(int new_len));
+                              return Ok(frame_bytes!(int new_len));
                          }
                          _ => {
                              // WRONGTYPE error if key exists but isn’t a list
@@ -810,23 +803,20 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                              let mut new_frames: Vec<Frame> =
                                  elements.into_iter().map(|s| frame!(bulk s)).rev().collect();
 
-                             // Prepend by inserting at the front
-                             new_frames.append(arr); // moves arr to the back of new_frames
-                             *arr = new_frames;
+                              // Prepend by inserting at the front
+                              new_frames.append(arr); // moves arr to the back of new_frames
+                              *arr = new_frames;
 
-                             let new_len = arr.len();
+                              let new_len = arr.len();
 
-                             // Notify any waiting BLPOP commands
-                             drop(cache); // Release lock before notifying
-                             // Check if there are clients waiting for this key
-                              let mut queue_guard = self.blocking_queue.lock().await;
-                              if let Some(waiting_client) = queue_guard.dequeue(&key) {
-                                  info!("Notifying waiting BLPOP client for key: {}", key);
-                                  // The client will check the list again and pop the element
-                                  waiting_client.notifier.notify_waiters();
-                              }
+                              // Notify any waiting BLPOP commands
+                              drop(cache); // Release lock before notifying
+                              info!("Notifying waiting BLPOP clients for key: {}", key);
+                               if let Some(blocked_client) = self.blocking_queue.lock().await.dequeue(&key) {
+                                   blocked_client.notifier.notify_waiters();
+                               }
 
-                             return Ok(frame_bytes!(int new_len));
+                              return Ok(frame_bytes!(int new_len));
                          }
                          _ => {
                              // WRONGTYPE error if key exists but isn’t a list
@@ -1138,7 +1128,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     let wait_fut = async {
                         loop {
                             info!("WAIT: waiting for notification...");
-                            self.ack_notifier.notified().await;
+                            self.notification_manager.wait_for(NotifierType::Ack).await;
                             info!("WAIT: notified!");
 
                             let current_count = get_current_ack_count().await;

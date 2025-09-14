@@ -15,8 +15,8 @@ use crate::server::RedisServer;
 use crate::shared_cache::Cache;
 use crate::stream::{StreamEntry, StreamId};
 use crate::types::{
-    BlockedClient, BlockingQueue, BoxedAsyncWrite, ReplicationMsg, ServerState, SharedMut,
-    resolve_stream_id,
+    BlockedClient, BlockingQueue, BoxedAsyncWrite, NotificationManager, NotifierType,
+    ReplicationMsg, ServerState, SharedMut, resolve_stream_id,
 };
 use crate::{commands::RedisCommand, stream::XaddStreamId};
 use bytes::Bytes;
@@ -30,9 +30,8 @@ pub async fn handle_client(
     server: SharedMut<RedisServer>,
     role: &str,
     cache: SharedMut<Cache>,
+    notification_manager: Option<NotificationManager>,
     acks_map: Option<SharedMut<HashMap<SocketAddr, usize>>>,
-    ack_notifier: Option<Arc<Notify>>,
-    xadd_notifier: Option<Arc<Notify>>,
     blocking_queue: Option<SharedMut<BlockingQueue>>,
 ) -> Result<()> {
     info!("Starting handle_client for {}", socket_addr);
@@ -88,7 +87,7 @@ pub async fn handle_client(
                     key,
                     parsed_id,
                     fields,
-                    xadd_notifier.as_ref(),
+                    notification_manager.as_ref(),
                 )
                 .await
                 {
@@ -103,6 +102,7 @@ pub async fn handle_client(
                     socket_addr,
                     key,
                     time_sec,
+                    notification_manager.as_ref(),
                     blocking_queue.as_ref(),
                 )
                 .await
@@ -118,7 +118,7 @@ pub async fn handle_client(
                     socket_addr,
                     role,
                     acks_map.as_ref(),
-                    ack_notifier.as_ref(),
+                    notification_manager.as_ref(),
                     command,
                 )
                 .await
@@ -215,7 +215,7 @@ async fn handle_xadd(
     key: String,
     parsed_id: XaddStreamId,
     fields: HashMap<String, String>,
-    xadd_notifier: Option<&Arc<Notify>>,
+    notification_manager: Option<&NotificationManager>,
 ) -> Result<()> {
     info!("Received XADD command for key: {}", key);
     info!("Attempting to lock cache for XADD");
@@ -255,7 +255,9 @@ async fn handle_xadd(
                 response = RespError::StreamIdNotGreater.to_resp();
             } else {
                 vec.push(stream_entry);
-                xadd_notifier.unwrap().notify_waiters();
+                if let Some(nm) = notification_manager {
+                    nm.notify(NotifierType::XAdd).await;
+                }
             }
         } else {
             entry.value = Frame::Stream(vec![stream_entry]);
@@ -287,6 +289,7 @@ async fn handle_blpop(
     socket_addr: SocketAddr,
     key: String,
     time_sec: f64,
+    notification_manager: Option<&NotificationManager>,
     blocking_queue: Option<&SharedMut<BlockingQueue>>,
 ) -> Result<()> {
     info!(
@@ -295,57 +298,45 @@ async fn handle_blpop(
     );
 
     loop {
-        // Check if the list has elements
+        // Try to pop from the list (with write lock to make it atomic)
         {
-            let cache_guard = cache.lock().await;
-            if let Some(entry) = cache_guard.get(&key) {
-                if let Frame::List(arr) = &entry.value {
+            let mut cache_write = cache.lock().await;
+            if let Some(entry) = cache_write.get_mut(&key) {
+                if let Frame::List(arr) = &mut entry.value {
                     if !arr.is_empty() {
-                        // List has elements, pop the first one
-                        drop(cache_guard); // Release read lock
-
-                        // Acquire write lock to modify
-                        let mut cache_write = cache.lock().await;
-                        if let Some(entry) = cache_write.get_mut(&key) {
-                            if let Frame::List(arr) = &mut entry.value {
-                                if !arr.is_empty() {
-                                    let popped_element = arr.remove(0);
-                                    if arr.is_empty() {
-                                        // Remove the key if list is now empty
-                                        cache_write.remove(&key);
-                                    }
-
-                                    // Return the result
-                                    let response =
-                                        frame_bytes!(list => [frame!(bulk key), popped_element]);
-                                    writer.lock().await.write_all(&response).await?;
-                                    writer.lock().await.flush().await?;
-                                    return Ok(());
-                                }
-                            }
+                        let popped_element = arr.remove(0);
+                        if arr.is_empty() {
+                            // Remove the key if list is now empty
+                            cache_write.remove(&key);
                         }
+
+                        // Return the result
+                        let response = frame_bytes!(list => [frame!(bulk key), popped_element]);
+                        writer.lock().await.write_all(&response).await?;
+                        writer.lock().await.flush().await?;
+                        return Ok(());
                     }
                 }
             }
         }
 
-        // List is empty, register in blocking queue
-        if let Some(queue) = blocking_queue {
-            info!("BLPOP registering client {} for key: {}", socket_addr, key);
-            let blocked_client = BlockedClient::new(socket_addr, writer.clone());
-            let client_notifier = blocked_client.notifier.clone();
-
-            {
-                let mut queue_guard = queue.lock().await;
-                queue_guard.enqueue(key.clone(), blocked_client);
-            }
-
-            // Wait for notification from the blocking queue with timeout
+        // List is empty, wait for notification
+        if let Some(bq) = blocking_queue {
             info!(
                 "BLPOP waiting for notification for key: {} with timeout: {}",
                 key, time_sec
             );
 
+            let blocked_client = BlockedClient::new(socket_addr, writer.clone());
+            let client_notifier = blocked_client.notifier.clone();
+
+            // Add to blocking queue
+            {
+                let mut queue = bq.lock().await;
+                queue.enqueue(key.clone(), blocked_client);
+            }
+
+            // Wait for notification
             let wait_result = if time_sec == 0.0 {
                 // Indefinite wait
                 client_notifier.notified().await;
@@ -368,13 +359,13 @@ async fn handle_blpop(
                     );
                 }
                 Err(_) => {
-                    // Timeout occurred, remove client from queue and return null array
+                    // Timeout occurred, remove from queue and return null array
                     info!(
                         "BLPOP timeout occurred for key: {}, returning null array",
                         key
                     );
                     {
-                        let mut queue_guard = queue.lock().await;
+                        let mut queue_guard = bq.lock().await;
                         queue_guard.remove_client(socket_addr);
                     }
                     let response = frame_bytes!(null_list);
@@ -398,13 +389,12 @@ async fn handle_replconf_ack(
     socket_addr: SocketAddr,
     op2: &str,
     acks_map: Option<&SharedMut<HashMap<SocketAddr, usize>>>,
-    ack_notifier: Option<&Arc<Notify>>,
+    notification_manager: Option<&NotificationManager>,
 ) -> Result<()> {
     info!("Handling REPLCONF ACK from {}", socket_addr);
     if let Ok(offset) = op2.parse::<usize>() {
-        // ---- START REFACTORED CODE ----
-        // We use the passed-in acks_map and notifier, avoiding the main server lock.
-        if let (Some(acks), Some(notifier)) = (acks_map, ack_notifier) {
+        // We use the passed-in acks_map and notification_manager, avoiding the main server lock.
+        if let (Some(acks), Some(nm)) = (acks_map, notification_manager) {
             info!("Attempting to acquire acks_guard mutex directly");
             let mut acks_guard = acks.lock().await;
             info!("Successfully acquired acks_guard mutex");
@@ -420,11 +410,11 @@ async fn handle_replconf_ack(
             // Drop the lock explicitly before notifying to be clean
             drop(acks_guard);
             // Notify any waiting WAIT commands
-            notifier.notify_waiters();
+            nm.notify(NotifierType::Ack).await;
 
             info!("Notified waiters after ACK update.");
         } else {
-            info!("Error: Received ACK but acks_map/notifier not available.");
+            info!("Error: Received ACK but acks_map/notification_manager not available.");
         }
     } else {
         info!("Failed to parse ACK offset from {}", op2);
@@ -439,7 +429,7 @@ async fn handle_generic_command(
     socket_addr: SocketAddr,
     role: &str,
     acks_map: Option<&SharedMut<HashMap<SocketAddr, usize>>>,
-    ack_notifier: Option<&Arc<Notify>>,
+    notification_manager: Option<&NotificationManager>,
     command: RedisCommand,
 ) -> Result<()> {
     info!(
@@ -452,7 +442,7 @@ async fn handle_generic_command(
         if let RedisCommand::ReplConf((ref op1, ref op2)) = command {
             info!("Received REPLCONF command: op1={}, op2={}", op1, op2);
             if op1.to_uppercase() == "ACK" {
-                handle_replconf_ack(socket_addr, op2, acks_map, ack_notifier).await?;
+                handle_replconf_ack(socket_addr, op2, acks_map, notification_manager).await?;
                 // No response needed for ACK
                 return Ok(()); // Continue to the next loop iteration
             }
