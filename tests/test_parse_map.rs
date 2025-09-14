@@ -74,7 +74,7 @@ fn test_valid_array_values() {
     let mut expected_map = HashMap::new();
     expected_map.insert(
         "array_key".to_string(),
-        Frame::Array(vec![
+        Frame::List(vec![
             Frame::SimpleString("item1".to_string()),
             Frame::Integer(123),
             Frame::Boolean(false),
@@ -166,7 +166,7 @@ fn test_valid_complex_mixed_map() {
     expected_map.insert("number".to_string(), Frame::Integer(42));
     expected_map.insert(
         "list".to_string(),
-        Frame::Array(vec![
+        Frame::List(vec![
             Frame::SimpleString("a".to_string()),
             Frame::SimpleString("b".to_string()),
         ]),
@@ -202,7 +202,10 @@ fn test_invalid_maps() {
 
     // Missing \r\n terminator after count
     assert_eq!(
-        parse_maps(b"%1\r\n+key\r\n+value").err().unwrap().to_string(),
+        parse_maps(b"%1\r\n+key\r\n+value")
+            .err()
+            .unwrap()
+            .to_string(),
         "ERR Unexpected end of input"
     );
 
@@ -356,7 +359,7 @@ fn test_nested_complex_structures() {
     let mut expected_map = HashMap::new();
     expected_map.insert(
         "complex".to_string(),
-        Frame::Array(vec![Frame::Map(inner_map)]),
+        Frame::List(vec![Frame::Map(inner_map)]),
     );
 
     assert_eq!(
@@ -424,7 +427,7 @@ fn test_deeply_nested_structures() {
     let mut level2_map = HashMap::new();
     level2_map.insert(
         "level2".to_string(),
-        Frame::Array(vec![
+        Frame::List(vec![
             Frame::SimpleString("item1".to_string()),
             Frame::SimpleString("item2".to_string()),
         ]),
@@ -433,7 +436,7 @@ fn test_deeply_nested_structures() {
     let mut expected_map = HashMap::new();
     expected_map.insert(
         "level1".to_string(),
-        Frame::Array(vec![Frame::Map(level2_map)]),
+        Frame::List(vec![Frame::Map(level2_map)]),
     );
 
     assert_eq!(

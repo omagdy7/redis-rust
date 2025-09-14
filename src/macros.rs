@@ -5,8 +5,8 @@ macro_rules! frame_bytes {
         Frame::Null.to_resp()
     };
 
-    (null_array) => {
-        Frame::NullArray.to_resp()
+    (null_list) => {
+        Frame::NullList.to_resp()
     };
 
     // Simple String: resp!("PONG") or resp!(simple "PONG")
@@ -32,13 +32,13 @@ macro_rules! frame_bytes {
         Frame::BulkString($s.into()).to_resp()
     };
 
-    // Array: resp!(array => [resp!(bulk "one"), resp!(int 2)])
-     (array => [$($elem:expr),*]) => {
-         Frame::Array(vec![$($elem),*]).to_resp()
+    // List: resp!(list => [resp!(bulk "one"), resp!(int 2)])
+     (list => [$($elem:expr),*]) => {
+         Frame::List(vec![$($elem),*]).to_resp()
      };
 
-     (array => $vec:expr) => {
-         Frame::Array($vec).to_resp()
+     (list => $vec:expr) => {
+         Frame::List($vec).to_resp()
      };
 
 
@@ -102,8 +102,8 @@ macro_rules! frame {
         Frame::Null
     };
 
-    (null_array) => {
-        Frame::NullArray
+    (null_list) => {
+        Frame::NullList
     };
 
     // Simple String: resp!("PONG") or resp!(simple "PONG")
@@ -130,13 +130,13 @@ macro_rules! frame {
         Frame::BulkString(Bytes::copy_from_slice($s.as_bytes()))
     };
 
-    // Array: resp!(array => [resp!(bulk "one"), resp!(int 2)])
-    (array => [$($elem:expr),*]) => {
-        Frame::Array(vec![$($elem),*])
+    // List: resp!(list => [resp!(bulk "one"), resp!(int 2)])
+    (list => [$($elem:expr),*]) => {
+        Frame::List(vec![$($elem),*])
     };
 
-    (array => $vec:expr) => {
-        Frame::Array($vec)
+    (list => $vec:expr) => {
+        Frame::List($vec)
     };
 
     // Boolean: resp!(bool true)

@@ -124,6 +124,30 @@ pub enum RedisCommand {
     Multi,
     Exec,
     Discard,
+    Rpush {
+        key: String,
+        elements: Vec<String>,
+    },
+    Lpush {
+        key: String,
+        elements: Vec<String>,
+    },
+    LRange {
+        key: String,
+        start_idx: i64,
+        end_idx: i64,
+    },
+    Llen {
+        key: String,
+    },
+    Lpop {
+        key: String,
+        number_of_items: Option<u64>,
+    },
+    Blpop {
+        key: String,
+        time_sec: f64,
+    },
     Incr {
         key: String,
     },
@@ -159,6 +183,15 @@ impl RedisCommand {
         match frame {
             Frame::BulkString(bytes) => std::str::from_utf8(bytes).ok()?.parse::<u64>().ok(),
             Frame::Integer(i) => Some(*i as u64),
+            _ => None,
+        }
+    }
+
+    /// Helper function to extract a f64 from a Frame (BulkString or Double)
+    fn extract_f64(frame: &Frame) -> Option<f64> {
+        match frame {
+            Frame::BulkString(bytes) => std::str::from_utf8(bytes).ok()?.parse::<f64>().ok(),
+            Frame::Double(i) => Some(*i),
             _ => None,
         }
     }
@@ -456,6 +489,102 @@ impl RedisCommand {
         };
         Self::Wait((op1, op2))
     }
+
+    fn parse_llen_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let op1_frame = Self::require_next_arg(&mut args);
+        let Some(op1_frame) = op1_frame else {
+            return Self::Invalid;
+        };
+        let Some(key) = Self::extract_string(op1_frame) else {
+            return Self::Invalid;
+        };
+
+        Self::Llen { key }
+    }
+
+    fn parse_rpush_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let op1_frame = Self::require_next_arg(&mut args);
+        let Some(op1_frame) = op1_frame else {
+            return Self::Invalid;
+        };
+        let Some(key) = Self::extract_string(op1_frame) else {
+            return Self::Invalid;
+        };
+
+        let mut elements = Vec::new();
+
+        while let Some(element) = Self::require_next_arg(&mut args) {
+            if let Some(element) = Self::extract_string(element) {
+                elements.push(element);
+            };
+        }
+
+        Self::Rpush { key, elements }
+    }
+
+    fn parse_lpush_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let op1_frame = Self::require_next_arg(&mut args);
+        let Some(op1_frame) = op1_frame else {
+            return Self::Invalid;
+        };
+        let Some(key) = Self::extract_string(op1_frame) else {
+            return Self::Invalid;
+        };
+
+        let mut elements = Vec::new();
+
+        while let Some(element) = Self::require_next_arg(&mut args) {
+            if let Some(element) = Self::extract_string(element) {
+                elements.push(element);
+            };
+        }
+
+        Self::Lpush { key, elements }
+    }
+
+    fn parse_lpop_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let op1_frame = Self::require_next_arg(&mut args);
+        let Some(op1_frame) = op1_frame else {
+            return Self::Invalid;
+        };
+        let Some(key) = Self::extract_string(op1_frame) else {
+            return Self::Invalid;
+        };
+
+        let mut number_of_items = None;
+
+        if let Some(no_items_frame) = Self::require_next_arg(&mut args)
+            && let Some(no_items) = Self::extract_u64(no_items_frame)
+        {
+            number_of_items = Some(no_items);
+        };
+
+        Self::Lpop {
+            key,
+            number_of_items,
+        }
+    }
+
+    fn parse_blpop_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let op1_frame = Self::require_next_arg(&mut args);
+        let op2_frame = Self::require_next_arg(&mut args);
+        let Some(op1_frame) = op1_frame else {
+            return Self::Invalid;
+        };
+        let Some(key) = Self::extract_string(op1_frame) else {
+            return Self::Invalid;
+        };
+
+        let Some(op2_frame) = op2_frame else {
+            return Self::Invalid;
+        };
+        let Some(time_sec) = Self::extract_f64(op2_frame) else {
+            return Self::Invalid;
+        };
+
+        Self::Blpop { key, time_sec }
+    }
+
     fn parse_multi_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
         if args.next().is_none() {
             Self::Multi
@@ -517,6 +646,11 @@ impl RedisCommand {
             "KEYS" => Self::parse_keys_command(args),
             "REPLCONF" => Self::parse_replconf_command(args),
             "WAIT" => Self::parse_wait_command(args),
+            "RPUSH" => Self::parse_rpush_command(args),
+            "LPUSH" => Self::parse_lpush_command(args),
+            "LLEN" => Self::parse_llen_command(args),
+            "LPOP" => Self::parse_lpop_command(args),
+            "BLPOP" => Self::parse_blpop_command(args),
             "MULTI" => Self::parse_multi_command(args),
             "EXEC" => Self::parse_exec_command(args),
             "DISCARD" => Self::parse_discard_command(args),
@@ -659,7 +793,7 @@ impl SetOptionParser {
 
 impl From<Frame> for RedisCommand {
     fn from(value: Frame) -> Self {
-        let Frame::Array(command) = value else {
+        let Frame::List(command) = value else {
             return Self::Invalid;
         };
 

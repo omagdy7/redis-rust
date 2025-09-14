@@ -19,11 +19,11 @@ pub enum Frame {
     /// Bulk String ($)
     BulkString(Bytes),
     /// Array (*)
-    Array(Vec<Frame>),
+    List(Vec<Frame>),
     /// Null (_)
     Null,
     /// Null (_)
-    NullArray,
+    NullList,
     /// Boolean (#)
     Boolean(bool),
     /// Double (,)
@@ -73,7 +73,7 @@ impl Frame {
                 let s = String::from_utf8_lossy(bytes.as_ref());
                 format!("${}\r\n{}\r\n", len, s).into_bytes()
             }
-            Frame::Array(arr) => {
+            Frame::List(arr) => {
                 let len = arr.len();
                 let mut result = format!("*{}\r\n", len).into_bytes();
                 for element in arr {
@@ -82,7 +82,7 @@ impl Frame {
                 result
             }
             Frame::Null => b"$-1\r\n".to_vec(),
-            Frame::NullArray => b"*-1\r\n".to_vec(),
+            Frame::NullList => b"*-1\r\n".to_vec(),
             Frame::Boolean(b) => format!("#{}\r\n", if *b { "t" } else { "f" }).into_bytes(),
             Frame::Double(d) => format!(",{}\r\n", d).into_bytes(),
             Frame::BigNumber(n) => format!("({}\r\n", n).into_bytes(),
@@ -217,7 +217,7 @@ impl Frame {
         }
     }
 
-    pub fn from_resp(data: &[u8]) -> Result<(Frame, usize), String> {
+    pub fn from_bytes(data: &[u8]) -> Result<(Frame, usize), String> {
         if data.is_empty() {
             return Err("Empty input".to_string());
         }
@@ -287,16 +287,16 @@ impl Frame {
                         .map_err(|_| "Invalid array length")?;
                     let mut consumed = pos + 3;
                     if len == -1 {
-                        return Ok((Frame::NullArray, consumed));
+                        return Ok((Frame::NullList, consumed));
                     }
                     let len = len as usize;
                     let mut items = Vec::with_capacity(len);
                     for _ in 0..len {
-                        let (frame, used) = Frame::from_resp(&data[consumed..])?;
+                        let (frame, used) = Frame::from_bytes(&data[consumed..])?;
                         items.push(frame);
                         consumed += used;
                     }
-                    Ok((Frame::Array(items), consumed))
+                    Ok((Frame::List(items), consumed))
                 } else {
                     Err("Malformed Array".to_string())
                 }
@@ -345,7 +345,7 @@ impl Frame {
     /// Get the array elements if this is an array frame
     pub fn as_array(&self) -> Option<&[Frame]> {
         match self {
-            Frame::Array(arr) => Some(arr),
+            Frame::List(arr) => Some(arr),
             _ => None,
         }
     }
@@ -366,7 +366,7 @@ impl fmt::Display for Frame {
                 Ok(s) => write!(f, "{}", s),
                 Err(_) => write!(f, "<binary data>"),
             },
-            Frame::Array(arr) => {
+            Frame::List(arr) => {
                 write!(f, "[")?;
                 for (i, item) in arr.iter().enumerate() {
                     if i > 0 {
@@ -387,7 +387,7 @@ impl fmt::Display for Frame {
                 write!(f, "]")
             }
             Frame::Null => write!(f, "(null)"),
-            Frame::NullArray => write!(f, "(null_array)"),
+            Frame::NullList => write!(f, "(null_array)"),
             Frame::Boolean(b) => write!(f, "{}", b),
             Frame::Double(d) => write!(f, "{}", d),
             Frame::BigNumber(n) => write!(f, "{}", n),
@@ -427,7 +427,7 @@ impl Frame {
     }
 
     pub fn array(items: Vec<Frame>) -> Self {
-        Frame::Array(items)
+        Frame::List(items)
     }
 
     pub fn boolean(b: bool) -> Self {
@@ -466,7 +466,7 @@ impl PartialEq for Frame {
             (Frame::SimpleError(a), Frame::SimpleError(b)) => a == b,
             (Frame::Integer(a), Frame::Integer(b)) => a == b,
             (Frame::BulkString(a), Frame::BulkString(b)) => a == b,
-            (Frame::Array(a), Frame::Array(b)) => a == b,
+            (Frame::List(a), Frame::List(b)) => a == b,
             (Frame::Null, Frame::Null) => true,
             (Frame::Boolean(a), Frame::Boolean(b)) => a == b,
             (Frame::Double(a), Frame::Double(b)) => a == b, // Note: This uses == which is fine for f64

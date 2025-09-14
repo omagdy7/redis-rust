@@ -12,7 +12,7 @@ fn test_valid_arrays() {
         parse_array(b"*2\r\n$5\r\nhello\r\n$5\r\nworld\r\n")
             .unwrap()
             .0,
-        Frame::Array(arr)
+        Frame::List(arr)
     );
 
     // Array with mixed types
@@ -23,12 +23,12 @@ fn test_valid_arrays() {
     ];
     assert_eq!(
         parse_array(b"*3\r\n:42\r\n+OK\r\n_\r\n").unwrap().0,
-        Frame::Array(arr)
+        Frame::List(arr)
     );
 
     // Nested array
     let arr = vec![
-        Frame::Array(vec![
+        Frame::List(vec![
             Frame::BulkString("nested".into()),
             Frame::Integer(123),
         ]),
@@ -38,12 +38,12 @@ fn test_valid_arrays() {
         parse_array(b"*2\r\n*2\r\n$6\r\nnested\r\n:123\r\n-ERR test\r\n")
             .unwrap()
             .0,
-        Frame::Array(arr)
+        Frame::List(arr)
     );
 
     // Empty array
     let arr = vec![];
-    assert_eq!(parse_array(b"*0\r\n").unwrap().0, Frame::Array(arr));
+    assert_eq!(parse_array(b"*0\r\n").unwrap().0, Frame::List(arr));
 }
 
 #[test]
@@ -88,7 +88,10 @@ fn test_invalid_arrays() {
     );
 
     // Empty input
-    assert_eq!(parse_array(b"").err().unwrap().to_string(), "ERR Empty data");
+    assert_eq!(
+        parse_array(b"").err().unwrap().to_string(),
+        "ERR Empty data"
+    );
 
     // Just the marker
     assert_eq!(
@@ -98,7 +101,10 @@ fn test_invalid_arrays() {
 
     // Invalid element type
     assert_eq!(
-        parse_array(b"*1\r\n@invalid\r\n").err().unwrap().to_string(),
+        parse_array(b"*1\r\n@invalid\r\n")
+            .err()
+            .unwrap()
+            .to_string(),
         "ERR Invalid data type"
     );
 }
@@ -108,24 +114,24 @@ fn test_array_remaining_bytes() {
     // Test with remaining data
     let arr = vec![Frame::BulkString("test".into()), Frame::Integer(99)];
     let (value, remaining) = parse_array(b"*2\r\n$4\r\ntest\r\n:99\r\n+OK\r\n").unwrap();
-    assert_eq!(value, Frame::Array(arr));
+    assert_eq!(value, Frame::List(arr));
     assert_eq!(remaining, b"+OK\r\n");
 
     // Test with no remaining data
     let arr = vec![Frame::SimpleString("PONG".to_string())];
     let (value, remaining) = parse_array(b"*1\r\n+PONG\r\n").unwrap();
-    assert_eq!(value, Frame::Array(arr));
+    assert_eq!(value, Frame::List(arr));
     assert_eq!(remaining, b"");
 
     // Test with multiple commands
     let arr = vec![Frame::Null];
     let (value, remaining) = parse_array(b"*1\r\n_\r\n*0\r\n").unwrap();
-    assert_eq!(value, Frame::Array(arr));
+    assert_eq!(value, Frame::List(arr));
     assert_eq!(remaining, b"*0\r\n");
 
     // Test with empty array and remaining data
     let arr = vec![];
     let (value, remaining) = parse_array(b"*0\r\n-ERR test\r\n").unwrap();
-    assert_eq!(value, Frame::Array(arr));
+    assert_eq!(value, Frame::List(arr));
     assert_eq!(remaining, b"-ERR test\r\n");
 }

@@ -64,12 +64,12 @@ impl SlaveRole for SlaveServer {
                 };
 
                 // Step1: PING
-                send_command(&frame_bytes!(array => [frame!(bulk "PING")]), true).await?;
+                send_command(&frame_bytes!(list => [frame!(bulk "PING")]), true).await?;
 
                 let port = self.config.port.clone();
                 // Step2: REPLCONF listening-port <PORT>
                 send_command(
-                    &frame_bytes!(array => [
+                    &frame_bytes!(list => [
                         frame!(bulk "REPLCONF"),
                         frame!(bulk "listening-port"),
                         frame!(bulk port)
@@ -80,7 +80,7 @@ impl SlaveRole for SlaveServer {
 
                 // Step3: REPLCONF capa psync2
                 send_command(
-                    &frame_bytes!(array => [
+                    &frame_bytes!(list => [
                         frame!(bulk "REPLCONF"),
                         frame!(bulk "capa"),
                         frame!(bulk "psync2")
@@ -91,7 +91,7 @@ impl SlaveRole for SlaveServer {
 
                 // Step 4: PSYNC <REPL_ID> <REPL_OFFSSET>
                 send_command(
-                    &frame_bytes!(array => [
+                    &frame_bytes!(list => [
                         frame!(bulk "PSYNC"),
                         frame!(bulk "?"),
                         frame!(bulk "-1")
@@ -323,12 +323,12 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                 }
                 RC::ConfigGet(s) => match s.as_str() {
                     "dir" => Ok(
-                        frame_bytes!(array => [frame!(bulk s), frame!(bulk self.config.dir.as_deref().unwrap_or(""))]),
+                        frame_bytes!(list => [frame!(bulk s), frame!(bulk self.config.dir.as_deref().unwrap_or(""))]),
                     ),
                     "dbfilename" => Ok(
-                        frame_bytes!(array => [frame!(bulk s), frame!(bulk self.config.dbfilename.as_deref().unwrap_or(""))]),
+                        frame_bytes!(list => [frame!(bulk s), frame!(bulk self.config.dbfilename.as_deref().unwrap_or(""))]),
                     ),
-                    _ => Ok(frame_bytes!(array => [])),
+                    _ => Ok(frame_bytes!(list => [])),
                 },
                 RC::Keys(query) => {
                     let query = query.replace('*', ".*");
@@ -342,7 +342,7 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                         .filter(|key| regex.is_match(key))
                         .map(|key| Frame::BulkString(Bytes::copy_from_slice(key.as_bytes())))
                         .collect();
-                    Ok(Frame::Array(matching_keys).to_resp())
+                    Ok(Frame::List(matching_keys).to_resp())
                 }
                 RC::Info(_sub_command) => {
                     // Slaves respond with their role
@@ -353,6 +353,19 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                     );
                     Ok(frame_bytes!(bulk info_response))
                 }
+                RC::Rpush { key, elements } => todo!(),
+                RC::Lpush { key, elements } => todo!(),
+                RC::LRange {
+                    key,
+                    start_idx,
+                    end_idx,
+                } => todo!(),
+                RC::Llen { key } => todo!(),
+                RC::Lpop {
+                    key,
+                    number_of_items,
+                } => todo!(),
+                RC::Blpop { key, time_sec } => todo!(),
                 RC::Multi => {
                     info!("Received MULTI command");
                     todo!()
@@ -449,7 +462,7 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                 RC::ReplConf((op1, op2)) => {
                     if op1.to_uppercase() == "GETACK" && op2 == "*" {
                         let state = self.state.lock().await;
-                        Ok(frame_bytes!(array => [
+                        Ok(frame_bytes!(list => [
                             frame!(bulk "REPLCONF"),
                             frame!(bulk "ACK"),
                             frame!(bulk state.master_repl_offset.to_string())

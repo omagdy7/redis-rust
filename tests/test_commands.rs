@@ -20,7 +20,7 @@ fn build_command_from_str_slice(args: &[&str]) -> Frame {
         .iter()
         .map(|s| Frame::BulkString(Bytes::copy_from_slice(s.as_bytes())))
         .collect();
-    Frame::Array(resp_args)
+    Frame::List(resp_args)
 }
 
 /// A helper to get a value directly from the cache for assertions.
@@ -30,10 +30,10 @@ async fn get_from_cache(cache: &SharedMut<Cache>, key: &str) -> Option<CacheEntr
 
 /// Tests for the `RedisCommands::from(Frame)` parser logic.
 mod command_parser_tests {
-    use codecrafters_redis::frame::Frame;
     use codecrafters_redis::commands::ExpiryOption;
     use codecrafters_redis::commands::RedisCommand;
     use codecrafters_redis::commands::SetCondition;
+    use codecrafters_redis::frame::Frame;
 
     use super::*;
 
@@ -300,8 +300,8 @@ mod set_command_tests {
 
     #[test]
     fn test_calculate_expiry_seconds() {
-        let cmd =
-            SetCommand::new("k".into(), Frame::BulkString("v".into())).with_expiry(Some(ExpiryOption::Seconds(10)));
+        let cmd = SetCommand::new("k".into(), Frame::BulkString("v".into()))
+            .with_expiry(Some(ExpiryOption::Seconds(10)));
         let expiry = cmd.calculate_expiry_time().unwrap();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -332,8 +332,8 @@ mod set_command_tests {
 
     #[test]
     fn test_calculate_expiry_for_none_and_keepttl() {
-        let cmd_keepttl =
-            SetCommand::new("k".into(), Frame::BulkString("v".into())).with_expiry(Some(ExpiryOption::KeepTtl));
+        let cmd_keepttl = SetCommand::new("k".into(), Frame::BulkString("v".into()))
+            .with_expiry(Some(ExpiryOption::KeepTtl));
         assert!(cmd_keepttl.calculate_expiry_time().is_none());
 
         let cmd_none = SetCommand::new("k".into(), Frame::BulkString("v".into())).with_expiry(None);

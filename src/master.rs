@@ -264,7 +264,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                             let type_str = match &entry.value {
                                 Frame::SimpleString(_) | Frame::BulkString(_) => "string",
                                 Frame::Integer(_) => "string", // Redis treats integers as strings
-                                Frame::Array(_) => "list",
+                                Frame::List(_) => "list",
                                 Frame::Set(_) => "set",
                                 Frame::Map(_) => "hash",
                                 Frame::Stream(_) => "stream",
@@ -325,7 +325,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     };
 
                     let frame_value = set_cmd.value.clone();
-                    let broadcast_cmd = frame_bytes!(array => [
+                    let broadcast_cmd = frame_bytes!(list => [
                         frame!(bulk "SET"),
                         frame!(bulk set_cmd.key.clone()),
                         frame_value.clone()
@@ -516,10 +516,10 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                 let id_str = stream.id.to_string();
                                 filtered_frames.push(vec![frame!(bulk id_str)]);
                                 let fields = stream
-                                                            .fields
-                                                            .iter()
-                                                            .map(|(key, value)| frame!(array => [frame!(bulk key.clone()), frame!(bulk value.clone())]))
-                                                            .collect::<Vec<Frame>>();
+                                                                        .fields
+                                                                        .iter()
+                                                                        .map(|(key, value)| frame!(list => [frame!(bulk key.clone()), frame!(bulk value.clone())]))
+                                                                        .collect::<Vec<Frame>>();
                                 filtered_frames
                                     .last_mut()
                                     .unwrap()
@@ -527,9 +527,9 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                             }
                             let filtered_frames: Vec<Frame> = filtered_frames
                                 .into_iter()
-                                .map(|x| frame!(array => x))
+                                .map(|x| frame!(list => x))
                                 .collect();
-                            return Ok(frame_bytes!(array => filtered_frames));
+                            return Ok(frame_bytes!(list => filtered_frames));
                         }
                     }
 
@@ -599,7 +599,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                 Err(_) => {
                                     info!("XREAD timed out after {}ms", timeout_ms);
                                     // Return null on timeout with no new entries
-                                    return Ok(frame_bytes!(null_array));
+                                    return Ok(frame_bytes!(null_list));
                                 }
                             }
                         }
@@ -639,11 +639,11 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                             })
                                             .collect::<Vec<Frame>>();
                                         // Each entry: ["0-1", ["temperature", "65"]]
-                                        let entry = frame!(array => [frame!(bulk id_str), frame!(array => fields)]);
+                                        let entry = frame!(list => [frame!(bulk id_str), frame!(list => fields)]);
                                         entries.push(entry);
                                     }
                                     // Wrap into: ["grape", [entries...]]
-                                    let stream_resp = frame!(array => [frame!(bulk key.clone()), frame!(array => entries)]);
+                                    let stream_resp = frame!(list => [frame!(bulk key.clone()), frame!(list => entries)]);
                                     stream_responses.push(stream_resp);
                                 }
                             }
@@ -656,7 +656,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     }
 
                     // Final response is an array of streams
-                    Ok(frame_bytes!(array => stream_responses))
+                    Ok(frame_bytes!(list => stream_responses))
                 }
                 RC::ConfigGet(ref s) => {
                     if self
@@ -667,15 +667,15 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     }
                     info!("Received CONFIG GET for key: {}", s);
                     match s.as_str() {
-                        "dir" => Ok(frame_bytes!(array => [
+                        "dir" => Ok(frame_bytes!(list => [
                             frame!(bulk s),
                             frame!(bulk self.config.dir.as_deref().unwrap_or(""))
                         ])),
-                        "dbfilename" => Ok(frame_bytes!(array => [
+                        "dbfilename" => Ok(frame_bytes!(list => [
                             frame!(bulk s),
                             frame!(bulk self.config.dbfilename.as_deref().unwrap_or(""))
                         ])),
-                        _ => Ok(frame_bytes!(array => [])),
+                        _ => Ok(frame_bytes!(list => [])),
                     }
                 }
                 RC::Keys(ref query) => {
@@ -704,7 +704,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         .collect();
                     info!("Matched {} keys", matching_keys.len());
 
-                    Ok(Frame::Array(matching_keys).to_resp())
+                    Ok(Frame::List(matching_keys).to_resp())
                 }
                 RC::Info(ref _sub_command) => {
                     if self
@@ -743,6 +743,189 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     // PSYNC is handled specially in `handle_client`, this is a fallback.
                     Err(RespError::InvalidStreamOperation)
                 }
+                RC::Rpush { key, elements } => {
+                    info!(
+                        "Recieved RPUSH command with key: {}, and elements: {:?}",
+                        key, elements
+                    );
+                    info!("Attempting to acquire cache lock");
+                    let mut cache = self.cache.lock().await;
+                    info!("Cache lock acquired");
+
+                    // Get or insert an empty array
+                    let entry = cache.entry(key.clone()).or_insert_with(|| CacheEntry {
+                        value: frame!(list => []),
+                        expires_at: None,
+                    });
+
+                    match &mut entry.value {
+                        Frame::List(arr) => {
+                            // Convert Vec<String> into Frames and append
+                            arr.extend(elements.into_iter().map(|s| frame!(bulk s)));
+
+                            let new_len = arr.len();
+                            return Ok(frame_bytes!(int new_len));
+                        }
+                        _ => {
+                            // WRONGTYPE error if key exists but isn’t a list
+                            return Err(RespError::WrongType);
+                        }
+                    }
+                }
+                RC::Lpush { key, elements } => {
+                    info!(
+                        "Recieved LPUSH command with key: {}, and elements: {:?}",
+                        key, elements
+                    );
+                    info!("Attempting to acquire cache lock");
+                    let mut cache = self.cache.lock().await;
+                    info!("Cache lock acquired");
+
+                    // Get or insert an empty array
+                    let entry = cache.entry(key.clone()).or_insert_with(|| CacheEntry {
+                        value: frame!(list => []),
+                        expires_at: None,
+                    });
+
+                    match &mut entry.value {
+                        Frame::List(arr) => {
+                            // Convert Vec<String> into BulkString frames
+                            let mut new_frames: Vec<Frame> =
+                                elements.into_iter().map(|s| frame!(bulk s)).collect();
+
+                            // Prepend by inserting at the front
+                            new_frames.append(arr); // moves arr to the back of new_frames
+                            *arr = new_frames;
+
+                            let new_len = arr.len();
+                            return Ok(frame_bytes!(int new_len));
+                        }
+                        _ => {
+                            // WRONGTYPE error if key exists but isn’t a list
+                            return Err(RespError::WrongType);
+                        }
+                    }
+                }
+                RC::LRange {
+                    key,
+                    start_idx,
+                    end_idx,
+                } => {
+                    info!(
+                        "Received Lrange command with key: {} start_idx: {}, end_idx: {}",
+                        key, start_idx, end_idx
+                    );
+                    let cache = self.cache.lock().await;
+                    let start_idx = start_idx as isize;
+                    let end_idx = end_idx as isize;
+
+                    match cache.get(&key) {
+                        Some(entry) => match &entry.value {
+                            Frame::List(arr) => {
+                                let len = arr.len() as isize;
+
+                                // Normalize negative indices
+                                let mut start = if start_idx < 0 {
+                                    len + start_idx
+                                } else {
+                                    start_idx
+                                };
+                                let mut end = if end_idx < 0 { len + end_idx } else { end_idx };
+
+                                // Clamp to valid range
+                                if start < 0 {
+                                    start = 0;
+                                }
+                                if end < 0 {
+                                    end = 0;
+                                }
+                                if start >= len {
+                                    return Ok(frame_bytes!(list => Vec::<Frame>::new()));
+                                }
+                                if end >= len {
+                                    end = len - 1;
+                                }
+
+                                // If range is invalid (start > end) → empty array
+                                if start > end {
+                                    return Ok(frame_bytes!(list => vec![]));
+                                }
+
+                                // Slice is inclusive of end
+                                let slice = &arr[start as usize..=end as usize];
+                                let response = slice.to_vec();
+
+                                Ok(frame_bytes!(list => response))
+                            }
+                            _ => Err(RespError::WrongType),
+                        },
+                        None => Ok(frame_bytes!(list => vec![])), // non-existent key → empty array
+                    }
+                }
+                RC::Llen { key } => {
+                    info!("Recieved Llen command with key: {}", key);
+                    info!("Attempting to acquire cache lock");
+                    let mut cache = self.cache.lock().await;
+                    info!("Cache lock acquired");
+                    match cache.entry(key) {
+                        Entry::Occupied(occupied_entry) => {
+                            let frame = &occupied_entry.get().value;
+                            match frame {
+                                Frame::List(arr) => Ok(frame_bytes!(int arr.len())),
+                                _ => Err(RespError::WrongType),
+                            }
+                        }
+                        Entry::Vacant(_) => Ok(frame_bytes!(int 0)),
+                    }
+                }
+                RC::Lpop {
+                    key,
+                    number_of_items,
+                } => {
+                    info!(
+                        "Received LPOP command with key: {}, and number_of_items: {:?}",
+                        key, number_of_items
+                    );
+                    let mut cache = self.cache.lock().await;
+
+                    match cache.entry(key) {
+                        Entry::Occupied(mut occupied_entry) => {
+                            let frame = &mut occupied_entry.get_mut().value;
+                            match frame {
+                                Frame::List(arr) => {
+                                    let count = number_of_items.unwrap_or(1) as usize;
+                                    let len = arr.len();
+
+                                    if len == 0 {
+                                        // Empty list behaves like non-existent
+                                        occupied_entry.remove();
+                                        return Ok(frame_bytes!(null));
+                                    }
+
+                                    if count == 1 {
+                                        // Single element → BulkString
+                                        let value = arr.remove(0);
+                                        if arr.is_empty() {
+                                            occupied_entry.remove(); // delete key if list now empty
+                                        }
+                                        return Ok(value.to_resp());
+                                    } else {
+                                        // Multiple elements → Array
+                                        let actual = count.min(len);
+                                        let drained: Vec<_> = arr.drain(..actual).collect();
+                                        if arr.is_empty() {
+                                            occupied_entry.remove(); // delete key if list now empty
+                                        }
+                                        return Ok(frame_bytes!(list => drained));
+                                    }
+                                }
+                                _ => Err(RespError::WrongType),
+                            }
+                        }
+                        Entry::Vacant(_) => Ok(frame_bytes!(null)),
+                    }
+                }
+                RC::Blpop { key, time_sec } => todo!(),
                 RC::Multi => {
                     info!("Received Multi command");
                     info!("Starting transaction");
@@ -795,7 +978,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                 transaction::TxState::Queuing => {
                                     if transaction.is_empty_queue() {
                                         info!("State is queuing and commands queue is empty");
-                                        response = Ok(frame_bytes!(array => vec![]));
+                                        response = Ok(frame_bytes!(list => vec![]));
                                         drop(transactions_guard);
                                     } else {
                                         // execute the commands
@@ -818,11 +1001,11 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                         let arr_clone = arr.clone();
                                         let flatten_arr = arr_clone
                                             .into_iter()
-                                            .filter(|bytes| Frame::from_resp(&bytes).is_ok())
-                                            .map(|bytes| Frame::from_resp(&bytes).unwrap().0)
+                                            .filter(|bytes| Frame::from_bytes(&bytes).is_ok())
+                                            .map(|bytes| Frame::from_bytes(&bytes).unwrap().0)
                                             .collect();
 
-                                        response = Ok(frame_bytes!(array => flatten_arr))
+                                        response = Ok(frame_bytes!(list => flatten_arr))
                                     }
                                 }
                                 transaction::TxState::Discarded => todo!(),
@@ -908,7 +1091,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     }
 
                     info!("Broadcasting GETACK to replicas");
-                    let getack_cmd = frame_bytes!(array => [
+                    let getack_cmd = frame_bytes!(list => [
                         frame!(bulk "REPLCONF"),
                         frame!(bulk "GETACK"),
                         frame!(bulk "*")

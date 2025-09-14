@@ -31,8 +31,6 @@ pub const ATTRIBUTES: u8 = b'|';
 pub const SETS: u8 = b'~';
 pub const PUSHES: u8 = b'>';
 
-
-
 // Helper function to find CRLF and split bytes
 fn find_crlf(bytes: &[u8]) -> Result<(&[u8], &[u8]), RespError> {
     bytes
@@ -151,7 +149,7 @@ pub fn parse_array(bytes: &[u8]) -> Result<(Frame, &[u8]), RespError> {
         return Err(RespError::UnexpectedEnd);
     }
 
-    Ok((Frame::Array(array), remained))
+    Ok((Frame::List(array), remained))
 }
 
 pub fn parse_bulk_strings(bytes: &[u8]) -> Result<(Frame, &[u8]), RespError> {
