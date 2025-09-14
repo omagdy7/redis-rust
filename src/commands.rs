@@ -132,7 +132,7 @@ pub enum RedisCommand {
         key: String,
         elements: Vec<String>,
     },
-    LRange {
+    Lrange {
         key: String,
         start_idx: i64,
         end_idx: i64,
@@ -174,6 +174,15 @@ impl RedisCommand {
     fn extract_string(frame: &Frame) -> Option<String> {
         match frame {
             Frame::BulkString(bytes) => std::str::from_utf8(bytes).ok().map(|s| s.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Helper function to extract a u64 from a Frame (BulkString or Integer)
+    fn extract_i64(frame: &Frame) -> Option<i64> {
+        match frame {
+            Frame::BulkString(bytes) => std::str::from_utf8(bytes).ok()?.parse::<i64>().ok(),
+            Frame::Integer(i) => Some(*i as i64),
             _ => None,
         }
     }
@@ -565,6 +574,29 @@ impl RedisCommand {
         }
     }
 
+    fn parse_lrange_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let key = Self::require_next_arg(&mut args);
+        let start_idx = Self::require_next_arg(&mut args);
+        let end_idx = Self::require_next_arg(&mut args);
+        let (Some(key), Some(start_idx), Some(end_idx)) = (key, start_idx, end_idx) else {
+            return Self::Invalid;
+        };
+        let Some(key) = Self::extract_string(key) else {
+            return Self::Invalid;
+        };
+        let Some(start_idx) = Self::extract_i64(start_idx) else {
+            return Self::Invalid;
+        };
+        let Some(end_idx) = Self::extract_i64(end_idx) else {
+            return Self::Invalid;
+        };
+        Self::Lrange {
+            key,
+            start_idx,
+            end_idx,
+        }
+    }
+
     fn parse_blpop_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
         let op1_frame = Self::require_next_arg(&mut args);
         let op2_frame = Self::require_next_arg(&mut args);
@@ -650,6 +682,7 @@ impl RedisCommand {
             "LPUSH" => Self::parse_lpush_command(args),
             "LLEN" => Self::parse_llen_command(args),
             "LPOP" => Self::parse_lpop_command(args),
+            "LRANGE" => Self::parse_lrange_command(args),
             "BLPOP" => Self::parse_blpop_command(args),
             "MULTI" => Self::parse_multi_command(args),
             "EXEC" => Self::parse_exec_command(args),

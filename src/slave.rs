@@ -355,7 +355,7 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                 }
                 RC::Rpush { key, elements } => todo!(),
                 RC::Lpush { key, elements } => todo!(),
-                RC::LRange {
+                RC::Lrange {
                     key,
                     start_idx,
                     end_idx,

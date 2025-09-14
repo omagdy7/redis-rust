@@ -806,7 +806,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         }
                     }
                 }
-                RC::LRange {
+                RC::Lrange {
                     key,
                     start_idx,
                     end_idx,
