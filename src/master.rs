@@ -765,10 +765,8 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                     // response should be empty array
                                 }
                                 transaction::TxState::Queuing => {
-                                    if transaction.is_empty_queue() {
-                                        response = Ok(frame_bytes!("OK"))
-                                    } else {
-                                        // execute the commands
+                                    response = Ok(frame_bytes!("OK"));
+                                    if !transaction.is_empty_queue() {
                                         transaction.discard();
                                     }
                                 }
