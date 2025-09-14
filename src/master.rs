@@ -791,7 +791,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         Frame::List(arr) => {
                             // Convert Vec<String> into BulkString frames
                             let mut new_frames: Vec<Frame> =
-                                elements.into_iter().map(|s| frame!(bulk s)).collect();
+                                elements.into_iter().map(|s| frame!(bulk s)).rev().collect();
 
                             // Prepend by inserting at the front
                             new_frames.append(arr); // moves arr to the back of new_frames
