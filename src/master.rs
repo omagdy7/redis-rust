@@ -1162,6 +1162,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     info!("WAIT returning final_count={}", final_count);
                     Ok(frame_bytes!(int final_count as u64))
                 }
+                RC::Subscribe { .. } | RC::Unsubscribe { .. } | RC::Publish { .. } => todo!(),
                 RC::Invalid => {
                     info!("Received INVALID command");
                     Err(RespError::InvalidCommandSyntax)

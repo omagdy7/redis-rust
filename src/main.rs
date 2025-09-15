@@ -7,7 +7,7 @@ use codecrafters_redis::{
     server::RedisServer,
     shared_cache::*,
     transaction,
-    types::{BoxedAsyncWrite, SharedMut},
+    types::{BlockingQueue, BoxedAsyncWrite, NotificationManager, SharedMut},
 };
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
@@ -17,54 +17,66 @@ use tokio::{
 };
 use tracing::{error, info};
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
+async fn initialize_server() -> RedisServer {
     tracing_subscriber::fmt::init();
-    let server = match RedisServer::new().await {
+    match RedisServer::new().await {
         Ok(Some(server)) => server,
         Ok(None) => RedisServer::new_master(), // Default to master if no args
         Err(e) => {
             error!("Error: {}", e);
             std::process::exit(1);
         }
-    };
+    }
+}
 
-    info!("Server created and its role is {}", server.role());
-
-    load_rdb(&server).await;
+async fn setup_listener(server: &RedisServer) -> tokio::net::TcpListener {
     let port = server.port().to_string();
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
+    tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap()
+}
 
-    let role = {
-        if let RedisServer::Master(_) = server {
-            "master"
-        } else {
-            "slave"
-        }
-    };
+fn get_role(server: &RedisServer) -> &'static str {
+    if let RedisServer::Master(_) = server {
+        "master"
+    } else {
+        "slave"
+    }
+}
 
-    spawn_cleanup_task(server.cache().clone());
-    let server = Arc::new(Mutex::new(server));
+async fn extract_master_resources(
+    server: &Arc<Mutex<RedisServer>>,
+) -> (
+    Option<Arc<Mutex<HashMap<std::net::SocketAddr, usize>>>>,
+    Option<NotificationManager>,
+    Option<Arc<Mutex<BlockingQueue>>>,
+) {
+    let server_guard = server.lock().await;
+    if let RedisServer::Master(master) = &*server_guard {
+        (
+            Some(master.acks.clone()),
+            Some(master.notification_manager.clone()),
+            Some(master.blocking_queue.clone()),
+        )
+    } else {
+        (None, None, None)
+    }
+}
 
-    let (acks_for_handler, notification_manager_handler, blocking_queue_handler) = {
-        let server_guard = server.lock().await;
-        if let RedisServer::Master(master) = &*server_guard {
-            (
-                Some(master.acks.clone()),
-                Some(master.notification_manager.clone()),
-                Some(master.blocking_queue.clone()),
-            )
-        } else {
-            (None, None, None)
-        }
-    };
-
-    let cache = server.lock().await.cache().clone();
+async fn run_server_loop(
+    listener: tokio::net::TcpListener,
+    server_arc: Arc<Mutex<RedisServer>>,
+    role: &'static str,
+    acks_for_handler: Option<Arc<Mutex<HashMap<std::net::SocketAddr, usize>>>>,
+    notification_manager_handler: Option<NotificationManager>,
+    blocking_queue_handler: Option<Arc<Mutex<BlockingQueue>>>,
+) -> std::io::Result<()> {
+    let cache = server_arc.lock().await.cache().clone();
 
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
-                let server_clone = Arc::clone(&server);
+                let server_clone = Arc::clone(&server_arc);
                 let acks_for_handler_clone = match acks_for_handler {
                     Some(ref inner) => Some(Arc::clone(inner)),
                     None => None,
@@ -118,4 +130,32 @@ async fn main() -> std::io::Result<()> {
             }
         }
     }
+}
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let server = initialize_server().await;
+
+    info!("Server created and its role is {}", server.role());
+
+    load_rdb(&server).await;
+    let listener = setup_listener(&server).await;
+
+    let role = get_role(&server);
+
+    spawn_cleanup_task(server.cache().clone());
+    let server_arc = Arc::new(Mutex::new(server));
+
+    let (acks_for_handler, notification_manager_handler, blocking_queue_handler) =
+        extract_master_resources(&server_arc).await;
+
+    run_server_loop(
+        listener,
+        server_arc,
+        role,
+        acks_for_handler,
+        notification_manager_handler,
+        blocking_queue_handler,
+    )
+    .await
 }

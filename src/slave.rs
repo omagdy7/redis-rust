@@ -353,19 +353,19 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                     );
                     Ok(frame_bytes!(bulk info_response))
                 }
-                RC::Rpush { key, elements } => todo!(),
-                RC::Lpush { key, elements } => todo!(),
+                RC::Rpush { key: _, elements: _ } => todo!(),
+                RC::Lpush { key: _, elements: _ } => todo!(),
                 RC::Lrange {
-                    key,
-                    start_idx,
-                    end_idx,
+                    key: _,
+                    start_idx: _,
+                    end_idx: _,
                 } => todo!(),
-                RC::Llen { key } => todo!(),
+                RC::Llen { key: _ } => todo!(),
                 RC::Lpop {
-                    key,
-                    number_of_items,
+                    key: _,
+                    number_of_items: _,
                 } => todo!(),
-                RC::Blpop { key, time_sec } => todo!(),
+                RC::Blpop { key: _, time_sec: _ } => todo!(),
                 RC::Multi => {
                     info!("Received MULTI command");
                     todo!()
@@ -471,6 +471,7 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                         Ok(frame_bytes!("OK")) // For other REPLCONFs during handshake
                     }
                 }
+                RC::Subscribe { .. } | RC::Unsubscribe { .. } | RC::Publish { .. } => todo!(),
                 RC::Psync(_) => Ok(RespError::OperationNotSupported.to_resp()),
                 RC::Wait(_) => Ok(frame_bytes!(error "ERR WAIT cannot be used with replica.")),
                 RC::Invalid => Ok(RespError::InvalidCommandSyntax.to_resp()),

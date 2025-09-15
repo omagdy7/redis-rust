@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ReadHalf},
     net::TcpStream,
-    sync::Notify,
     time::{Duration, timeout},
 };
 use tracing::{error, info};
@@ -289,7 +288,7 @@ async fn handle_blpop(
     socket_addr: SocketAddr,
     key: String,
     time_sec: f64,
-    notification_manager: Option<&NotificationManager>,
+    _notification_manager: Option<&NotificationManager>,
     blocking_queue: Option<&SharedMut<BlockingQueue>>,
 ) -> Result<()> {
     info!(
