@@ -61,9 +61,10 @@ pub enum ReplicationMsg {
 /// Types of notifiers used in the system
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NotifierType {
-    Ack,          // For replication acknowledgments (WAIT command)
-    XAdd,         // For stream XADD operations (XREAD blocking)
-    List(String), // For list operations (BLPOP blocking) - key-specific
+    Ack,                             // For replication acknowledgments (WAIT command)
+    XAdd,                            // For stream XADD operations (XREAD blocking)
+    List(String),                    // For list operations (BLPOP blocking) - key-specific
+    SubscribtionMsgRecieved(String), // For list operations (BLPOP blocking) - key-specific
 }
 
 /// Centralized manager for all notifiers in the system

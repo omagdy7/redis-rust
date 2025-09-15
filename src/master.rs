@@ -17,13 +17,13 @@ use tracing::{error, info};
 use crate::shared_cache::{Cache, CacheEntry};
 use crate::stream::{StreamEntry, StreamId, XReadStreamId, XrangeStreamdId};
 use crate::types::*;
+use crate::types::{NotificationManager, NotifierType};
 use crate::{
     commands::{ExpiryOption, RedisCommand, SetCondition},
     transaction::Transaction,
 };
 use crate::{error::RespError, transaction};
 use crate::{frame::Frame, transaction::TxState};
-use crate::types::{NotificationManager, NotifierType};
 
 #[derive(Debug, Clone)]
 pub struct MasterServer {
@@ -36,6 +36,7 @@ pub struct MasterServer {
     pub notification_manager: NotificationManager,
     pub blocking_queue: SharedMut<BlockingQueue>,
     pub transactions: SharedMut<HashMap<SocketAddr, Transaction>>,
+    pub subscribed_channels: SharedMut<HashMap<SocketAddr, Vec<String>>>,
 }
 
 impl MasterServer {
@@ -59,6 +60,7 @@ impl MasterServer {
         let blocking_queue = Arc::new(Mutex::new(BlockingQueue::new()));
         let acks = Arc::new(Mutex::new(HashMap::new()));
         let transactions = Arc::new(Mutex::new(HashMap::new()));
+        let subscribed_channels = Arc::new(Mutex::new(HashMap::new()));
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ReplicationMsg>(256);
 
@@ -112,6 +114,7 @@ impl MasterServer {
             notification_manager,
             blocking_queue,
             transactions,
+            subscribed_channels,
         }
     }
 
@@ -589,12 +592,13 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                             info!("Blocking XREAD with timeout: {}ms", timeout_ms);
                             // Wait for notification or timeout
                             let timeout_duration = Duration::from_millis(*timeout_ms);
-                            let xadd_notifier = self.notification_manager.get_notifier(NotifierType::XAdd).await;
-                            let timeout_result = tokio::time::timeout(
-                                timeout_duration,
-                                xadd_notifier.notified(),
-                            )
-                            .await;
+                            let xadd_notifier = self
+                                .notification_manager
+                                .get_notifier(NotifierType::XAdd)
+                                .await;
+                            let timeout_result =
+                                tokio::time::timeout(timeout_duration, xadd_notifier.notified())
+                                    .await;
 
                             match timeout_result {
                                 Ok(_) => info!("XREAD unblocked by notification"),
@@ -760,27 +764,29 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         expires_at: None,
                     });
 
-                     match &mut entry.value {
-                         Frame::List(arr) => {
-                             // Convert Vec<String> into Frames and append
-                              arr.extend(elements.into_iter().map(|s| frame!(bulk s)));
+                    match &mut entry.value {
+                        Frame::List(arr) => {
+                            // Convert Vec<String> into Frames and append
+                            arr.extend(elements.into_iter().map(|s| frame!(bulk s)));
 
-                              let new_len = arr.len();
+                            let new_len = arr.len();
 
-                              // Notify any waiting BLPOP commands
-                              drop(cache); // Release lock before notifying
-                              info!("Notifying waiting BLPOP clients for key: {}", key);
-                               if let Some(blocked_client) = self.blocking_queue.lock().await.dequeue(&key) {
-                                   blocked_client.notifier.notify_waiters();
-                               }
+                            // Notify any waiting BLPOP commands
+                            drop(cache); // Release lock before notifying
+                            info!("Notifying waiting BLPOP clients for key: {}", key);
+                            if let Some(blocked_client) =
+                                self.blocking_queue.lock().await.dequeue(&key)
+                            {
+                                blocked_client.notifier.notify_waiters();
+                            }
 
-                              return Ok(frame_bytes!(int new_len));
-                         }
-                         _ => {
-                             // WRONGTYPE error if key exists but isn’t a list
-                             return Err(RespError::WrongType);
-                         }
-                     }
+                            return Ok(frame_bytes!(int new_len));
+                        }
+                        _ => {
+                            // WRONGTYPE error if key exists but isn’t a list
+                            return Err(RespError::WrongType);
+                        }
+                    }
                 }
                 RC::Lpush { key, elements } => {
                     info!(
@@ -797,32 +803,34 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         expires_at: None,
                     });
 
-                     match &mut entry.value {
-                         Frame::List(arr) => {
-                             // Convert Vec<String> into BulkString frames
-                             let mut new_frames: Vec<Frame> =
-                                 elements.into_iter().map(|s| frame!(bulk s)).rev().collect();
+                    match &mut entry.value {
+                        Frame::List(arr) => {
+                            // Convert Vec<String> into BulkString frames
+                            let mut new_frames: Vec<Frame> =
+                                elements.into_iter().map(|s| frame!(bulk s)).rev().collect();
 
-                              // Prepend by inserting at the front
-                              new_frames.append(arr); // moves arr to the back of new_frames
-                              *arr = new_frames;
+                            // Prepend by inserting at the front
+                            new_frames.append(arr); // moves arr to the back of new_frames
+                            *arr = new_frames;
 
-                              let new_len = arr.len();
+                            let new_len = arr.len();
 
-                              // Notify any waiting BLPOP commands
-                              drop(cache); // Release lock before notifying
-                              info!("Notifying waiting BLPOP clients for key: {}", key);
-                               if let Some(blocked_client) = self.blocking_queue.lock().await.dequeue(&key) {
-                                   blocked_client.notifier.notify_waiters();
-                               }
+                            // Notify any waiting BLPOP commands
+                            drop(cache); // Release lock before notifying
+                            info!("Notifying waiting BLPOP clients for key: {}", key);
+                            if let Some(blocked_client) =
+                                self.blocking_queue.lock().await.dequeue(&key)
+                            {
+                                blocked_client.notifier.notify_waiters();
+                            }
 
-                              return Ok(frame_bytes!(int new_len));
-                         }
-                         _ => {
-                             // WRONGTYPE error if key exists but isn’t a list
-                             return Err(RespError::WrongType);
-                         }
-                     }
+                            return Ok(frame_bytes!(int new_len));
+                        }
+                        _ => {
+                            // WRONGTYPE error if key exists but isn’t a list
+                            return Err(RespError::WrongType);
+                        }
+                    }
                 }
                 RC::Lrange {
                     key,
@@ -943,7 +951,10 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         Entry::Vacant(_) => Ok(frame_bytes!(null)),
                     }
                 }
-                RC::Blpop { key: _, time_sec: _ } => {
+                RC::Blpop {
+                    key: _,
+                    time_sec: _,
+                } => {
                     // BLPOP is handled specially in client_handler.rs for blocking behavior
                     // This should not be reached in normal operation
                     Ok(frame_bytes!(null_list))
@@ -1030,7 +1041,9 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                         response = Ok(frame_bytes!(list => flatten_arr))
                                     }
                                 }
-                                transaction::TxState::Discarded => todo!(),
+                                transaction::TxState::Discarded => {
+                                    unreachable!("Bruh... How am I even here!!")
+                                }
                             }
                         }
                         Entry::Vacant(_) => {
@@ -1162,7 +1175,39 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     info!("WAIT returning final_count={}", final_count);
                     Ok(frame_bytes!(int final_count as u64))
                 }
-                RC::Subscribe { .. } | RC::Unsubscribe { .. } | RC::Publish { .. } => todo!(),
+                RC::Subscribe { channel } => {
+                    info!("Received Subscribe command with channel: {}", channel);
+                    info!("Starting subscriber mode");
+                    let subscribed_channels = self.subscribed_channels.as_ref();
+                    let mut subscribed_channels_guard = subscribed_channels.lock().await;
+                    let mut num_channels_subscribed = 1;
+                    match subscribed_channels_guard.entry(connection_socket) {
+                        Entry::Occupied(mut entry) => {
+                            info!(
+                                "There exits an entry for client {connection_socket} and now adding channel {channel} to existing channels"
+                            );
+                            entry.get_mut().push(channel.clone());
+                            num_channels_subscribed = entry.get().len();
+                        }
+                        Entry::Vacant(entry) => {
+                            info!(
+                                "There doesn't exist an entry for client {connection_socket} and now adding channel {channel}"
+                            );
+                            entry.insert(vec![channel.clone()]);
+                        }
+                    }
+                    Ok(frame_bytes!(list => vec![
+                        frame!(bulk "subscribe"),
+                        frame!(bulk channel),
+                        frame!(int num_channels_subscribed),
+                    ]))
+                }
+                RC::Unsubscribe { channel } => {
+                    todo!()
+                }
+                RC::Publish { channel, msg } => {
+                    todo!()
+                }
                 RC::Invalid => {
                     info!("Received INVALID command");
                     Err(RespError::InvalidCommandSyntax)
