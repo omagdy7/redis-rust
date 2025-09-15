@@ -58,6 +58,14 @@ pub enum ReplicationMsg {
     RemoveReplica(SocketAddr),
 }
 
+/// Represents the mode of the current_client
+#[derive(Debug, Clone, Copy)]
+pub enum ClientMode {
+    Normal,
+    Transaction,
+    Subscribe,
+}
+
 /// Types of notifiers used in the system
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NotifierType {
