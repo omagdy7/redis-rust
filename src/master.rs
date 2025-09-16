@@ -223,7 +223,9 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                             self.queue_transaction(command, connection_socket).await;
                             Ok(frame_bytes!("QUEUED"))
                         }
-                        ClientMode::Subscribe => Ok(frame_bytes!("PONG")),
+                        ClientMode::Subscribe => {
+                            Ok(frame_bytes!(list => vec![frame!(bulk "pong"), frame!(bulk "")]))
+                        }
                     }
                 }
                 RC::Echo(ref echo_string) => {
@@ -1234,8 +1236,10 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                         drop(transactions_guard);
 
                                         // Temporarily set client mode to Normal for execution
-                                        let original_mode = self.client_mode(connection_socket).await;
-                                        self.set_client_mode(connection_socket, ClientMode::Normal).await;
+                                        let original_mode =
+                                            self.client_mode(connection_socket).await;
+                                        self.set_client_mode(connection_socket, ClientMode::Normal)
+                                            .await;
 
                                         for (i, cmd) in commands.iter().enumerate() {
                                             info!("i: {i}, Executing command {cmd:?} in Exec");
@@ -1247,7 +1251,8 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                         }
 
                                         // Restore original client mode
-                                        self.set_client_mode(connection_socket, original_mode).await;
+                                        self.set_client_mode(connection_socket, original_mode)
+                                            .await;
 
                                         let arr_clone = arr.clone();
                                         let flatten_arr = arr_clone
