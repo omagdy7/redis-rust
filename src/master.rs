@@ -17,7 +17,7 @@ use tracing::{error, info};
 use crate::shared_cache::{Cache, CacheEntry};
 use crate::stream::{StreamEntry, StreamId, XReadStreamId, XrangeStreamdId};
 use crate::types::*;
-use crate::types::{NotificationManager, NotifierType};
+use crate::types::{NotificationManager, NotifierType, PubSubMsg};
 use crate::{
     commands::{ExpiryOption, RedisCommand, SetCondition},
     transaction::Transaction,
@@ -25,12 +25,13 @@ use crate::{
 use crate::{error::RespError, transaction};
 use crate::{frame::Frame, transaction::TxState};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MasterServer {
     pub config: Shared<ServerConfig>,
     pub cache: SharedMut<Cache>,
     pub connection_socket: SocketAddr,
     pub replication_msg_sender: Sender<ReplicationMsg>, // channel to send all that concerns replicaion nodes
+    pub pubsub_msg_sender: Sender<PubSubMsg>,           // channel to send pub/sub messages
     pub state: SharedMut<MasterState>,
     pub acks: SharedMut<HashMap<SocketAddr, usize>>,
     pub notification_manager: NotificationManager,
@@ -38,6 +39,25 @@ pub struct MasterServer {
     pub transactions: SharedMut<HashMap<SocketAddr, Transaction>>,
     pub subscribed_channels: SharedMut<HashMap<SocketAddr, Vec<String>>>,
     pub client_mode: SharedMut<HashMap<SocketAddr, ClientMode>>,
+}
+
+impl std::fmt::Debug for MasterServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MasterServer")
+            .field("config", &self.config)
+            .field("connection_socket", &self.connection_socket)
+            .field("state", &self.state)
+            .field("cache", &"<Cache>")
+            .field("replication_msg_sender", &"<Sender>")
+            .field("acks", &self.acks)
+            .field("notification_manager", &self.notification_manager)
+            .field("blocking_queue", &self.blocking_queue)
+            .field("transactions", &self.transactions)
+            .field("subscribed_channels", &self.subscribed_channels)
+            .field("client_mode", &self.client_mode)
+            .field("client_writers", &"<ClientWriters>")
+            .finish()
+    }
 }
 
 impl MasterServer {
@@ -106,9 +126,108 @@ impl MasterServer {
             }
         });
 
+        // Create pub/sub channel and task
+        let (pubsub_tx, mut pubsub_rx) = tokio::sync::mpsc::channel::<PubSubMsg>(256);
+
+        tokio::spawn(async move {
+            let mut subscribers: HashMap<String, Vec<SocketAddr>> = HashMap::new();
+            let mut client_writers: HashMap<SocketAddr, SharedMut<BoxedAsyncWrite>> =
+                HashMap::new();
+
+            while let Some(msg) = pubsub_rx.recv().await {
+                match msg {
+                    PubSubMsg::Publish {
+                        channel,
+                        message,
+                        sender,
+                    } => {
+                        info!("Publishing message to channel {}: {}", channel, message);
+
+                        // Get subscribers for this channel
+                        let sent_count = if let Some(client_addrs) = subscribers.get(&channel) {
+                            let mut count = 0;
+
+                            for &client_addr in client_addrs {
+                                // Get the client writer
+                                if let Some(writer) = client_writers.get(&client_addr) {
+                                    // Format the message as Redis pub/sub protocol
+                                    let message_frame = frame_bytes!(list => vec![
+                                        frame!(bulk "message"),
+                                        frame!(bulk channel.clone()),
+                                        frame!(bulk message.clone())
+                                    ]);
+
+                                    let mut writer_guard = writer.lock().await;
+                                    if let Err(e) = writer_guard.write_all(&message_frame).await {
+                                        error!(
+                                            "Failed to send pub/sub message to client {}: {}",
+                                            client_addr, e
+                                        );
+                                        continue;
+                                    }
+                                    if let Err(e) = writer_guard.flush().await {
+                                        error!(
+                                            "Failed to flush pub/sub message to client {}: {}",
+                                            client_addr, e
+                                        );
+                                        continue;
+                                    }
+                                    count += 1;
+                                    info!("Sent pub/sub message to client {}", client_addr);
+                                } else {
+                                    error!("No writer found for client {}", client_addr);
+                                }
+                            }
+
+                            info!(
+                                "Published message to {} subscribers on channel {}",
+                                count, channel
+                            );
+                            count
+                        } else {
+                            info!("No subscribers for channel {}", channel);
+                            0
+                        };
+
+                        // Send the count back to the publisher
+                        let _ = sender.send(sent_count);
+                    }
+                    PubSubMsg::AddSubscriber(client_addr, channel) => {
+                        info!("Adding subscriber {} to channel {}", client_addr, channel);
+                        subscribers
+                            .entry(channel)
+                            .or_insert_with(Vec::new)
+                            .push(client_addr);
+                    }
+                    PubSubMsg::AddWriter(client_addr, writer) => {
+                        info!("Adding writer for client {}", client_addr);
+                        client_writers.insert(client_addr, writer);
+                    }
+                    PubSubMsg::RemoveSubscriber(client_addr, channel) => {
+                        info!(
+                            "Removing subscriber {} from channel {}",
+                            client_addr, channel
+                        );
+                        if let Some(client_list) = subscribers.get_mut(&channel) {
+                            client_list.retain(|&addr| addr != client_addr);
+                            // Remove channel if no subscribers left
+                            if client_list.is_empty() {
+                                subscribers.remove(&channel);
+                            }
+                        }
+                    }
+                    PubSubMsg::RemoveWriter(client_addr) => {
+                        info!("Removing writer for client {}", client_addr);
+                        client_writers.remove(&client_addr);
+                    }
+                }
+            }
+        });
+
         Self {
             config,
             replication_msg_sender: tx,
+            pubsub_msg_sender: pubsub_tx,
             state,
             cache,
             connection_socket,
@@ -177,6 +296,10 @@ impl MasterServer {
 
     pub async fn set_client_mode(&self, socket: SocketAddr, new_mode: ClientMode) {
         self.client_mode.lock().await.insert(socket, new_mode);
+    }
+
+    pub fn get_pubsub_msg_sender(&self) -> Sender<PubSubMsg> {
+        self.pubsub_msg_sender.clone()
     }
 }
 
@@ -1435,6 +1558,16 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                             entry.insert(vec![channel.clone()]);
                         }
                     }
+
+                    // Send message to pubsub task to add subscriber
+                    let _ = self
+                        .pubsub_msg_sender
+                        .send(PubSubMsg::AddSubscriber(
+                            connection_socket,
+                            channel.clone(),
+                        ))
+                        .await;
+
                     info!(
                         "Client mode before: {:?}",
                         self.client_mode(connection_socket).await
@@ -1453,10 +1586,112 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     ]))
                 }
                 RC::Unsubscribe { channel } => {
-                    todo!()
+                    info!("Received UNSUBSCRIBE command for channel: {}", channel);
+
+                    let mut subscribed_channels = self.subscribed_channels.lock().await;
+                    let mut num_channels_remaining = 0;
+
+                    if let Some(channels) = subscribed_channels.get_mut(&connection_socket) {
+                        // Remove the specific channel if it exists
+                        channels.retain(|c| c != &channel);
+                        num_channels_remaining = channels.len();
+
+                        // If no channels left, remove the client from subscribe mode
+                        if channels.is_empty() {
+                            self.set_client_mode(connection_socket, ClientMode::Normal)
+                                .await;
+                            subscribed_channels.remove(&connection_socket);
+                        }
+                    }
+
+                    // Send message to pubsub task to remove subscriber
+                    let _ = self
+                        .pubsub_msg_sender
+                        .send(PubSubMsg::RemoveSubscriber(
+                            connection_socket,
+                            channel.clone(),
+                        ))
+                        .await;
+
+                    // If no channels left, send message to remove writer
+                    if num_channels_remaining == 0 {
+                        let _ = self
+                            .pubsub_msg_sender
+                            .send(PubSubMsg::RemoveWriter(connection_socket))
+                            .await;
+                    }
+
+                    info!(
+                        "Client {} unsubscribed from channel {}, {} channels remaining",
+                        connection_socket, channel, num_channels_remaining
+                    );
+
+                    Ok(frame_bytes!(list => vec![
+                        frame!(bulk "unsubscribe"),
+                        frame!(bulk channel),
+                        frame!(int num_channels_remaining as i64)
+                    ]))
                 }
-                RC::Publish { channel, msg } => {
-                    todo!()
+
+                RC::Publish {
+                    ref channel,
+                    ref msg,
+                } => {
+                    let mode = self.client_mode(connection_socket).await;
+                    info!("Received PUBLISH command in mode {mode:?}");
+                    match mode {
+                        ClientMode::Normal => {
+                            info!(
+                                "Received PUBLISH command for channel: {}, message: {}",
+                                channel, msg
+                            );
+
+                            // Count subscribers for this channel
+                            let subscriber_count = {
+                                let subscribed_channels = self.subscribed_channels.lock().await;
+                                subscribed_channels
+                                    .iter()
+                                    .filter(|(_, channels)| channels.contains(channel))
+                                    .count() as i64
+                            };
+
+                            info!(
+                                "Found {} subscribers for channel {}",
+                                subscriber_count, channel
+                            );
+
+                            // Create a channel to receive the actual count from pubsub task
+                            let (count_sender, count_receiver) =
+                                tokio::sync::oneshot::channel::<usize>();
+
+                            // Send message to pubsub task to handle broadcasting
+                            let _ = self
+                                .pubsub_msg_sender
+                                .send(PubSubMsg::Publish {
+                                    channel: channel.clone(),
+                                    message: msg.clone(),
+                                    sender: count_sender,
+                                })
+                                .await;
+
+                            info!(
+                                "Sent publish message to pubsub task for channel {}",
+                                channel
+                            );
+
+                            // Wait for the actual count from the pubsub task
+                            let actual_count = count_receiver.await.unwrap_or(0);
+
+                            Ok(frame_bytes!(int actual_count as i64))
+                        }
+                        ClientMode::Transaction => {
+                            self.queue_transaction(command, connection_socket).await;
+                            Ok(frame_bytes!("QUEUED"))
+                        }
+                        ClientMode::Subscribe => Ok(
+                            frame_bytes!(error "ERR Can't execute 'publish': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"),
+                        ),
+                    }
                 }
                 RC::Invalid => {
                     info!("Received INVALID command");

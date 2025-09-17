@@ -58,6 +58,14 @@ pub enum ReplicationMsg {
     RemoveReplica(SocketAddr),
 }
 
+pub enum PubSubMsg {
+    Publish { channel: String, message: String, sender: tokio::sync::oneshot::Sender<usize> },
+    AddSubscriber(SocketAddr, String),
+    AddWriter(SocketAddr, SharedMut<BoxedAsyncWrite>),
+    RemoveSubscriber(SocketAddr, String),
+    RemoveWriter(SocketAddr),
+}
+
 /// Represents the mode of the current_client
 #[derive(Debug, Clone, Copy)]
 pub enum ClientMode {

@@ -3,6 +3,7 @@ use std::{collections::HashMap, net::SocketAddr};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ReadHalf},
     net::TcpStream,
+    sync::mpsc,
     time::{Duration, timeout},
 };
 use tracing::{error, info};
@@ -15,7 +16,7 @@ use crate::shared_cache::Cache;
 use crate::stream::{StreamEntry, StreamId};
 use crate::types::{
     BlockedClient, BlockingQueue, BoxedAsyncWrite, NotificationManager, NotifierType,
-    ReplicationMsg, ServerState, SharedMut, resolve_stream_id,
+    PubSubMsg, ReplicationMsg, ServerState, SharedMut, resolve_stream_id,
 };
 use crate::{commands::RedisCommand, stream::XaddStreamId};
 use bytes::Bytes;
@@ -35,6 +36,8 @@ pub async fn handle_client(
 ) -> Result<()> {
     info!("Starting handle_client for {}", socket_addr);
 
+    // Client writer registration is now handled by the pubsub task when subscribing
+
     let mut buffer = [0; 1024];
 
     loop {
@@ -42,6 +45,7 @@ pub async fn handle_client(
         let n = match reader.read(&mut buffer).await {
             Ok(0) => {
                 info!("Client {} disconnected", socket_addr);
+                // Client writer unregistration is now handled by the pubsub task
                 return Ok(()); // connection closed
             }
             Ok(n) => {
@@ -50,6 +54,7 @@ pub async fn handle_client(
             }
             Err(e) => {
                 info!("Error while reading from client {}: {}", socket_addr, e);
+                // Client writer unregistration is now handled by the pubsub task
                 return Err(e).context("error occurred while reading from stream");
             }
         };
@@ -75,6 +80,22 @@ pub async fn handle_client(
                 }
                 continue; // Skip to next loop iteration
             }
+            RedisCommand::Blpop { key, time_sec } => {
+                if let Err(e) = handle_blpop(
+                    &cache,
+                    &writer,
+                    socket_addr,
+                    key,
+                    time_sec,
+                    notification_manager.as_ref(),
+                    blocking_queue.as_ref(),
+                )
+                .await
+                {
+                    error!("Error handling BLPOP: {}", e);
+                    return Err(e);
+                }
+            }
             RedisCommand::Xadd {
                 key,
                 parsed_id,
@@ -91,22 +112,6 @@ pub async fn handle_client(
                 .await
                 {
                     error!("Error handling XADD: {}", e);
-                    return Err(e);
-                }
-            }
-            RedisCommand::Blpop { key, time_sec } => {
-                if let Err(e) = handle_blpop(
-                    &cache,
-                    &writer,
-                    socket_addr,
-                    key,
-                    time_sec,
-                    notification_manager.as_ref(),
-                    blocking_queue.as_ref(),
-                )
-                .await
-                {
-                    error!("Error handling BLPOP: {}", e);
                     return Err(e);
                 }
             }
@@ -128,157 +133,6 @@ pub async fn handle_client(
             }
         }
     }
-}
-
-// helper function for PSYNC handling
-async fn handle_psync(
-    server: &SharedMut<RedisServer>,
-    writer: &SharedMut<BoxedAsyncWrite>,
-    socket_addr: SocketAddr,
-) -> Result<()> {
-    info!("Handling PSYNC command for client {}", socket_addr);
-
-    let (server_state, sender) = {
-        info!("Attempting to lock server for PSYNC state and sender");
-        let server_instance = server.lock().await;
-        info!("Server lock acquired for PSYNC");
-        (
-            server_instance.get_server_state_owned(),
-            server_instance.get_replication_msg_sender().await,
-        )
-    };
-
-    if let ServerState::MasterState(master) = server_state {
-        info!("Server is Master, fulfilling PSYNC handshake");
-
-        // Fulfill the master side of the handshake
-        info!("Attempting to lock master state for replid");
-
-        let master_state_guard = master.lock().await;
-        let replid = master_state_guard.replid();
-
-        info!("Master state lock acquired, replid={}", replid);
-
-        let response_str = format!("FULLRESYNC {} 0", replid);
-        let full_resync_response = frame_bytes!(response_str);
-
-        // Add this connection to the list of replicas
-        info!("Adding client {} as replica", socket_addr);
-        if let Some(sender) = sender {
-            sender
-                .send(ReplicationMsg::AddReplica(socket_addr, writer.clone()))
-                .await
-                .context("Failed to add replica")?;
-        } else {
-            return Err(anyhow::anyhow!(
-                "Replication sender not available in master mode"
-            ));
-        }
-        info!("Replica {} added successfully", socket_addr);
-        let server_guard = server.lock().await;
-
-        info!("adding acks of master's replica: {}", socket_addr);
-        if let RedisServer::Master(master) = &*server_guard {
-            master.acks.lock().await.insert(socket_addr, 0);
-        }
-
-        // Lock the writer to send the multi-part response
-        info!("Attempting to lock writer for FULLRESYNC response");
-        let mut writer_guard = writer.lock().await;
-        info!("Writer lock acquired for FULLRESYNC response");
-        writer_guard.write_all(&full_resync_response).await?;
-        info!("Sent FULLRESYNC response to {}", socket_addr);
-
-        if let Err(e) = send_empty_rdb(&mut *writer_guard).await {
-            error!("Failed to send empty RDB: {}", e);
-        }
-        info!("Sent empty RDB to {}", socket_addr);
-
-        writer_guard.flush().await?;
-        info!("Flushed writer after FULLRESYNC to {}", socket_addr);
-    } else {
-        // A slave should not receive a PSYNC command from a client
-        info!("Server is Slave, rejecting PSYNC command");
-        let response = RespError::OperationNotSupported.to_resp();
-        writer.lock().await.write_all(&response).await?;
-        info!("Sent PSYNC error response to {}", socket_addr);
-    }
-
-    Ok(())
-}
-
-// helper function for XADD handling
-async fn handle_xadd(
-    cache: &SharedMut<Cache>,
-    writer: &SharedMut<BoxedAsyncWrite>,
-    key: String,
-    parsed_id: XaddStreamId,
-    fields: HashMap<String, String>,
-    notification_manager: Option<&NotificationManager>,
-) -> Result<()> {
-    info!("Received XADD command for key: {}", key);
-    info!("Attempting to lock cache for XADD");
-    let mut cache = cache.lock().await;
-    info!("Cache lock acquired for XADD");
-
-    // Get the last stream entry to determine the next ID
-    let last_id = if let Some(entry) = cache.get(&key) {
-        if let Frame::Stream(ref vec) = entry.value {
-            vec.last().map(|e| e.id)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let stream_id = match resolve_stream_id(parsed_id, last_id) {
-        Ok(id) => id,
-        Err(e) => {
-            let response = frame_bytes!(error e);
-            writer.lock().await.write_all(&response).await?;
-            // HACK: I feel this could cause weird issues in the future
-            return Ok(());
-        }
-    };
-
-    let mut response = frame_bytes!(bulk stream_id.to_string());
-
-    let stream_entry = StreamEntry::new(stream_id, fields);
-
-    if let Some(entry) = cache.get_mut(&key) {
-        if let Frame::Stream(ref mut vec) = entry.value {
-            if stream_id == (StreamId { ms_time: 0, seq: 0 }) {
-                response = RespError::StreamIdTooSmall.to_resp();
-            } else if stream_id <= vec.last().unwrap().id {
-                response = RespError::StreamIdNotGreater.to_resp();
-            } else {
-                vec.push(stream_entry);
-                if let Some(nm) = notification_manager {
-                    nm.notify(NotifierType::XAdd).await;
-                }
-            }
-        } else {
-            entry.value = Frame::Stream(vec![stream_entry]);
-        }
-    } else {
-        cache.insert(
-            key.clone(),
-            crate::shared_cache::CacheEntry {
-                value: Frame::Stream(vec![stream_entry]),
-                expires_at: None,
-            },
-        );
-    }
-
-    info!("Inserted/key {}", key);
-
-    drop(cache);
-
-    writer.lock().await.write_all(&response).await?;
-    writer.lock().await.flush().await?;
-
-    Ok(())
 }
 
 // helper function for BLPOP handling
@@ -421,6 +275,157 @@ async fn handle_replconf_ack(
     Ok(())
 }
 
+// helper function for PSYNC handling
+async fn handle_psync(
+    server: &SharedMut<RedisServer>,
+    writer: &SharedMut<BoxedAsyncWrite>,
+    socket_addr: SocketAddr,
+) -> Result<()> {
+    info!("Handling PSYNC command for client {}", socket_addr);
+
+    let (server_state, sender) = {
+        info!("Attempting to lock server for PSYNC state and sender");
+        let server_instance = server.lock().await;
+        info!("Server lock acquired for PSYNC");
+        (
+            server_instance.get_server_state_owned(),
+            server_instance.get_replication_msg_sender().await,
+        )
+    };
+
+    if let ServerState::MasterState(master) = server_state {
+        info!("Server is Master, fulfilling PSYNC handshake");
+
+        // Fulfill the master side of the handshake
+        info!("Attempting to lock master state for replid");
+
+        let master_state_guard = master.lock().await;
+        let replid = master_state_guard.replid();
+
+        info!("Master state lock acquired, replid={}", replid);
+
+        let response_str = format!("FULLRESYNC {} 0", replid);
+        let full_resync_response = Frame::SimpleString(response_str.into()).to_resp();
+
+        // Add this connection to the list of replicas
+        info!("Adding client {} as replica", socket_addr);
+        if let Some(sender) = sender {
+            sender
+                .send(ReplicationMsg::AddReplica(socket_addr, writer.clone()))
+                .await
+                .context("Failed to add replica")?;
+        } else {
+            return Err(anyhow::anyhow!(
+                "Replication sender not available in master mode"
+            ));
+        }
+        info!("Replica {} added successfully", socket_addr);
+        let server_guard = server.lock().await;
+
+        info!("adding acks of master's replica: {}", socket_addr);
+        if let RedisServer::Master(master) = &*server_guard {
+            master.acks.lock().await.insert(socket_addr, 0);
+        }
+
+        // Lock the writer to send the multi-part response
+        info!("Attempting to lock writer for FULLRESYNC response");
+        let mut writer_guard = writer.lock().await;
+        info!("Writer lock acquired for FULLRESYNC response");
+        writer_guard.write_all(&full_resync_response).await?;
+        info!("Sent FULLRESYNC response to {}", socket_addr);
+
+        if let Err(e) = send_empty_rdb(&mut *writer_guard).await {
+            error!("Failed to send empty RDB: {}", e);
+        }
+        info!("Sent empty RDB to {}", socket_addr);
+
+        writer_guard.flush().await?;
+        info!("Flushed writer after FULLRESYNC to {}", socket_addr);
+    } else {
+        // A slave should not receive a PSYNC command from a client
+        info!("Server is Slave, rejecting PSYNC command");
+        let response = RespError::OperationNotSupported.to_resp();
+        writer.lock().await.write_all(&response).await?;
+        info!("Sent PSYNC error response to {}", socket_addr);
+    }
+
+    Ok(())
+}
+
+// helper function for XADD handling
+async fn handle_xadd(
+    cache: &SharedMut<Cache>,
+    writer: &SharedMut<BoxedAsyncWrite>,
+    key: String,
+    parsed_id: XaddStreamId,
+    fields: HashMap<String, String>,
+    notification_manager: Option<&NotificationManager>,
+) -> Result<()> {
+    info!("Received XADD command for key: {}", key);
+    info!("Attempting to lock cache for XADD");
+    let mut cache = cache.lock().await;
+    info!("Cache lock acquired for XADD");
+
+    // Get the last stream entry to determine the next ID
+    let last_id = if let Some(entry) = cache.get(&key) {
+        if let Frame::Stream(ref vec) = entry.value {
+            vec.last().map(|e| e.id)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let stream_id = match resolve_stream_id(parsed_id, last_id) {
+        Ok(id) => id,
+        Err(e) => {
+            let response = Frame::SimpleString(e.into()).to_resp();
+            writer.lock().await.write_all(&response).await?;
+            // HACK: I feel this could cause weird issues in the future
+            return Ok(());
+        }
+    };
+
+    let mut response = Frame::BulkString(stream_id.to_string().into()).to_resp();
+
+    let stream_entry = StreamEntry::new(stream_id, fields);
+
+    if let Some(entry) = cache.get_mut(&key) {
+        if let Frame::Stream(ref mut vec) = entry.value {
+            if stream_id == (StreamId { ms_time: 0, seq: 0 }) {
+                response = RespError::StreamIdTooSmall.to_resp();
+            } else if stream_id <= vec.last().unwrap().id {
+                response = RespError::StreamIdNotGreater.to_resp();
+            } else {
+                vec.push(stream_entry);
+                if let Some(nm) = notification_manager {
+                    nm.notify(NotifierType::XAdd).await;
+                }
+            }
+        } else {
+            entry.value = Frame::Stream(vec![stream_entry]);
+        }
+    } else {
+        cache.insert(
+            key.clone(),
+            crate::shared_cache::CacheEntry {
+                value: Frame::Stream(vec![stream_entry]),
+                expires_at: None,
+            },
+        );
+    }
+
+    info!("Inserted/key {}", key);
+
+    drop(cache);
+
+    writer.lock().await.write_all(&response).await?;
+    writer.lock().await.flush().await?;
+
+    Ok(())
+}
+
 // helper function for generic command handling
 async fn handle_generic_command(
     server: &SharedMut<RedisServer>,
@@ -445,6 +450,15 @@ async fn handle_generic_command(
                 // No response needed for ACK
                 return Ok(()); // Continue to the next loop iteration
             }
+        }
+    }
+
+    // Send client writer to pub/sub task if subscribing
+    if let RedisCommand::Subscribe { .. } = &command {
+        if let Some(pubsub_sender) = server.lock().await.get_pubsub_msg_sender().await {
+            let _ = pubsub_sender
+                .send(PubSubMsg::AddWriter(socket_addr, writer.clone()))
+                .await;
         }
     }
 

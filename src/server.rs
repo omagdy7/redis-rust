@@ -135,6 +135,15 @@ impl RedisServer {
         }
     }
 
+    pub async fn get_pubsub_msg_sender(
+        &self,
+    ) -> Option<tokio::sync::mpsc::Sender<super::types::PubSubMsg>> {
+        match self {
+            RedisServer::Master(master) => Some(master.get_pubsub_msg_sender()),
+            RedisServer::Slave(_) => None,
+        }
+    }
+
     pub fn role(&self) -> &str {
         match self {
             Self::Master(m) => m.role(),
