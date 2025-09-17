@@ -59,7 +59,7 @@ pub enum ReplicationMsg {
 }
 
 pub enum PubSubMsg {
-    Publish { channel: String, message: String, sender: tokio::sync::oneshot::Sender<usize> },
+    Publish { channel: String, message: String },
     AddSubscriber(SocketAddr, String),
     AddWriter(SocketAddr, SharedMut<BoxedAsyncWrite>),
     RemoveSubscriber(SocketAddr, String),

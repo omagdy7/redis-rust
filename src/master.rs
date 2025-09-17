@@ -136,15 +136,11 @@ impl MasterServer {
 
             while let Some(msg) = pubsub_rx.recv().await {
                 match msg {
-                    PubSubMsg::Publish {
-                        channel,
-                        message,
-                        sender,
-                    } => {
+                    PubSubMsg::Publish { channel, message } => {
                         info!("Publishing message to channel {}: {}", channel, message);
 
                         // Get subscribers for this channel
-                        let sent_count = if let Some(client_addrs) = subscribers.get(&channel) {
+                        if let Some(client_addrs) = subscribers.get(&channel) {
                             let mut count = 0;
 
                             for &client_addr in client_addrs {
@@ -183,14 +179,9 @@ impl MasterServer {
                                 "Published message to {} subscribers on channel {}",
                                 count, channel
                             );
-                            count
                         } else {
                             info!("No subscribers for channel {}", channel);
-                            0
                         };
-
-                        // Send the count back to the publisher
-                        let _ = sender.send(sent_count);
                     }
                     PubSubMsg::AddSubscriber(client_addr, channel) => {
                         info!("Adding subscriber {} to channel {}", client_addr, channel);
@@ -1562,10 +1553,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     // Send message to pubsub task to add subscriber
                     let _ = self
                         .pubsub_msg_sender
-                        .send(PubSubMsg::AddSubscriber(
-                            connection_socket,
-                            channel.clone(),
-                        ))
+                        .send(PubSubMsg::AddSubscriber(connection_socket, channel.clone()))
                         .await;
 
                     info!(
@@ -1660,17 +1648,12 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                 subscriber_count, channel
                             );
 
-                            // Create a channel to receive the actual count from pubsub task
-                            let (count_sender, count_receiver) =
-                                tokio::sync::oneshot::channel::<usize>();
-
                             // Send message to pubsub task to handle broadcasting
                             let _ = self
                                 .pubsub_msg_sender
                                 .send(PubSubMsg::Publish {
                                     channel: channel.clone(),
                                     message: msg.clone(),
-                                    sender: count_sender,
                                 })
                                 .await;
 
@@ -1679,10 +1662,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                 channel
                             );
 
-                            // Wait for the actual count from the pubsub task
-                            let actual_count = count_receiver.await.unwrap_or(0);
-
-                            Ok(frame_bytes!(int actual_count as i64))
+                            Ok(frame_bytes!(int subscriber_count as i64))
                         }
                         ClientMode::Transaction => {
                             self.queue_transaction(command, connection_socket).await;
