@@ -353,8 +353,14 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                     );
                     Ok(frame_bytes!(bulk info_response))
                 }
-                RC::Rpush { key: _, elements: _ } => todo!(),
-                RC::Lpush { key: _, elements: _ } => todo!(),
+                RC::Rpush {
+                    key: _,
+                    elements: _,
+                } => todo!(),
+                RC::Lpush {
+                    key: _,
+                    elements: _,
+                } => todo!(),
                 RC::Lrange {
                     key: _,
                     start_idx: _,
@@ -365,7 +371,10 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                     key: _,
                     number_of_items: _,
                 } => todo!(),
-                RC::Blpop { key: _, time_sec: _ } => todo!(),
+                RC::Blpop {
+                    key: _,
+                    time_sec: _,
+                } => todo!(),
                 RC::Multi => {
                     info!("Received MULTI command");
                     todo!()
@@ -472,12 +481,33 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                     }
                 }
                 RC::Subscribe { .. } | RC::Unsubscribe { .. } | RC::Publish { .. } => todo!(),
-                RC::Zadd { key: _, score: _, member: _ } => Ok(RespError::Custom("ZADD command not implemented".to_string()).to_resp()),
-                RC::Zrange { key: _, start: _, end: _, with_scores: _ } => Ok(RespError::Custom("ZRANGE command not implemented".to_string()).to_resp()),
-                RC::Zrank { key: _, member: _ } => Ok(RespError::Custom("ZRANK command not implemented".to_string()).to_resp()),
-                RC::Zscore { key: _, member: _ } => Ok(RespError::Custom("ZSCORE command not implemented".to_string()).to_resp()),
-                RC::Zcard { key: _ } => Ok(RespError::Custom("ZCARD command not implemented".to_string()).to_resp()),
-                RC::Zrem { key: _, member: _ } => Ok(RespError::Custom("ZREM command not implemented".to_string()).to_resp()),
+                RC::Zadd {
+                    key: _,
+                    score: _,
+                    member: _,
+                } => {
+                    todo!()
+                }
+                RC::Zrange {
+                    key: _,
+                    start: _,
+                    end: _,
+                    member: _,
+                } => {
+                    todo!()
+                }
+                RC::Zrank { key: _, member: _ } => {
+                    todo!()
+                }
+                RC::Zscore { key: _, member: _ } => {
+                    todo!()
+                }
+                RC::Zcard { key: _ } => {
+                    todo!()
+                }
+                RC::Zrem { key: _, member: _ } => {
+                    todo!()
+                }
                 RC::Psync(_) => Ok(RespError::OperationNotSupported.to_resp()),
                 RC::Wait(_) => Ok(frame_bytes!(error "ERR WAIT cannot be used with replica.")),
                 RC::Invalid => Ok(RespError::InvalidCommandSyntax.to_resp()),

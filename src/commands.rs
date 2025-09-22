@@ -163,9 +163,9 @@ pub enum RedisCommand {
     },
     Zrange {
         key: String,
-        start: i64,
-        end: i64,
-        with_scores: bool,
+        start: Option<i64>,
+        end: Option<i64>,
+        member: Option<String>,
     },
     Zrank {
         key: String,
@@ -687,37 +687,43 @@ impl RedisCommand {
 
     fn parse_zrange_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
         let key_frame = Self::require_next_arg(&mut args);
-        let start_frame = Self::require_next_arg(&mut args);
-        let end_frame = Self::require_next_arg(&mut args);
-        let (Some(key_frame), Some(start_frame), Some(end_frame)) = (key_frame, start_frame, end_frame) else {
+        let Some(key_frame) = key_frame else {
             return Self::Invalid;
         };
         let Some(key) = Self::extract_string(key_frame) else {
             return Self::Invalid;
         };
-        let Some(start) = Self::extract_i64(start_frame) else {
-            return Self::Invalid;
-        };
-        let Some(end) = Self::extract_i64(end_frame) else {
-            return Self::Invalid;
-        };
 
-        let mut with_scores = false;
-        if let Some(option_frame) = args.next() {
-            if let Some(option) = Self::extract_string(option_frame) {
-                if option.eq_ignore_ascii_case("WITHSCORES") {
-                    with_scores = true;
-                } else {
+        let arg1_frame = Self::require_next_arg(&mut args);
+        let arg2_frame = args.next();
+
+        let (start, end, member) = if let Some(arg1_frame) = arg1_frame {
+            if let Some(arg2_frame) = arg2_frame {
+                // Two args: start and end
+                let Some(start) = Self::extract_i64(arg1_frame) else {
                     return Self::Invalid;
-                }
+                };
+                let Some(end) = Self::extract_i64(arg2_frame) else {
+                    return Self::Invalid;
+                };
+                (Some(start), Some(end), None)
+            } else {
+                // One arg: member
+                let Some(member) = Self::extract_string(arg1_frame) else {
+                    return Self::Invalid;
+                };
+                (None, None, Some(member))
             }
-        }
+        } else {
+            // No args: invalid
+            return Self::Invalid;
+        };
 
         Self::Zrange {
             key,
             start,
             end,
-            with_scores,
+            member,
         }
     }
 

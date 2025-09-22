@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use regex::Regex;
 use std::{
-    collections::{BTreeMap, HashMap, hash_map::Entry},
+    collections::{HashMap, hash_map::Entry},
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     pin::Pin,
@@ -14,19 +14,16 @@ use tokio::{
 };
 use tracing::{error, info};
 
+use crate::shared_cache::{Cache, CacheEntry};
 use crate::stream::{StreamEntry, StreamId, XReadStreamId, XrangeStreamdId};
 use crate::types::*;
 use crate::types::{NotificationManager, NotifierType, PubSubMsg};
 use crate::{
     commands::{ExpiryOption, RedisCommand, SetCondition},
     error::RespError,
-    frame::Frame,
+    frame::{Frame, SortedSet},
     transaction::{Transaction, TxState},
     types::ClientMode,
-};
-use crate::{
-    frame::OrderedFloat,
-    shared_cache::{Cache, CacheEntry},
 };
 
 #[derive(Clone)]
@@ -1694,38 +1691,18 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                             info!("Cache lock acquired for ZADD");
 
                             let entry = cache.entry(key.clone()).or_insert_with(|| CacheEntry {
-                                value: Frame::SortedSet(BTreeMap::new()),
+                                value: Frame::SortedSet(SortedSet::new()),
                                 expires_at: None,
                             });
 
-                            // TODO: Find a way to make this faster this is very inefficient for
-                            // large sorted sets as it's pretty much O(n^2) to get the logic right
                             match &mut entry.value {
                                 Frame::SortedSet(sorted_set) => {
-                                    let ordered_score = OrderedFloat(score);
-                                    // Check if member already exists
-                                    let was_present =
-                                        sorted_set.values().any(|members| members.contains(member));
-
-                                    // Remove member from any existing score
-                                    for members in sorted_set.values_mut() {
-                                        members.retain(|m| m != member);
-                                    }
-
-                                    // Remove empty score entries
-                                    sorted_set.retain(|_, members| !members.is_empty());
-
-                                    // Add to new score
-                                    sorted_set
-                                        .entry(ordered_score)
-                                        .or_insert_with(Vec::new)
-                                        .push(member.clone());
-
+                                    let added = sorted_set.insert(score, member.clone());
                                     info!(
                                         "Added member {} with score {} to sorted set {}",
                                         member, score, key
                                     );
-                                    let added_count = if was_present { 0 } else { 1 };
+                                    let added_count = if added { 1 } else { 0 };
                                     Ok(frame_bytes!(int added_count)) // Number of elements added
                                 }
                                 _ => Err(RespError::WrongType),
@@ -1741,25 +1718,187 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     }
                 }
                 RC::Zrange {
-                    key: _,
-                    start: _,
-                    end: _,
-                    with_scores: _,
-                } => Err(RespError::Custom(
-                    "ZRANGE command not implemented".to_string(),
-                )),
-                RC::Zrank { key: _, member: _ } => Err(RespError::Custom(
-                    "ZRANK command not implemented".to_string(),
-                )),
-                RC::Zscore { key: _, member: _ } => Err(RespError::Custom(
-                    "ZSCORE command not implemented".to_string(),
-                )),
-                RC::Zcard { key: _ } => Err(RespError::Custom(
-                    "ZCARD command not implemented".to_string(),
-                )),
-                RC::Zrem { key: _, member: _ } => Err(RespError::Custom(
-                    "ZREM command not implemented".to_string(),
-                )),
+                    ref key,
+                    start,
+                    end,
+                    ref member,
+                } => {
+                    let mode = self.client_mode(connection_socket).await;
+                    info!("Received ZRANGE command in mode {mode:?}");
+                    match mode {
+                        ClientMode::Normal => {
+                            let cache = self.cache.lock().await;
+                            if let Some(entry) = cache.get(key) {
+                                if let Frame::SortedSet(sorted_set) = &entry.value {
+                                    if let Some(member) = member {
+                                        info!(
+                                            "Received ZRANGE command for key: {}, member: {}",
+                                            key, member
+                                        );
+                                        if let Some(rank) = sorted_set.rank(member) {
+                                            Ok(frame_bytes!(int rank as i64))
+                                        } else {
+                                            Ok(frame_bytes!(null))
+                                        }
+                                    } else if let (Some(start), Some(end)) = (start, end) {
+                                        info!(
+                                            "Received ZRANGE command for key: {}, start: {}, end: {}",
+                                            key, start, end
+                                        );
+                                        let frames =
+                                            sorted_set.range(start as isize, end as isize, false);
+                                        Ok(frame_bytes!(list => frames))
+                                    } else {
+                                        Err(RespError::InvalidArgument)
+                                    }
+                                } else {
+                                    Err(RespError::WrongType)
+                                }
+                            } else {
+                                if member.is_some() {
+                                    Ok(frame_bytes!(null))
+                                } else {
+                                    Ok(frame_bytes!(list => Vec::<Frame>::new()))
+                                }
+                            }
+                        }
+                        ClientMode::Transaction => {
+                            self.queue_transaction(command, connection_socket).await;
+                            Ok(frame_bytes!("QUEUED"))
+                        }
+                        ClientMode::Subscribe => Ok(
+                            frame_bytes!(error "ERR Can't execute 'zrange': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"),
+                        ),
+                    }
+                }
+                RC::Zrank {
+                    ref key,
+                    ref member,
+                } => {
+                    let mode = self.client_mode(connection_socket).await;
+                    info!("Received ZRANK command in mode {mode:?}");
+                    match mode {
+                        ClientMode::Normal => {
+                            info!(
+                                "Received ZRANK command for key: {}, member: {}",
+                                key, member
+                            );
+                            let cache = self.cache.lock().await;
+                            if let Some(entry) = cache.get(key) {
+                                if let Frame::SortedSet(sorted_set) = &entry.value {
+                                    if let Some(rank) = sorted_set.rank(member) {
+                                        Ok(frame_bytes!(int rank as i64))
+                                    } else {
+                                        Ok(frame_bytes!(null))
+                                    }
+                                } else {
+                                    Err(RespError::WrongType)
+                                }
+                            } else {
+                                Ok(frame_bytes!(null))
+                            }
+                        }
+                        ClientMode::Transaction => {
+                            self.queue_transaction(command, connection_socket).await;
+                            Ok(frame_bytes!("QUEUED"))
+                        }
+                        ClientMode::Subscribe => Ok(
+                            frame_bytes!(error "ERR Can't execute 'zrank': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"),
+                        ),
+                    }
+                }
+                RC::Zscore {
+                    ref key,
+                    ref member,
+                } => {
+                    let mode = self.client_mode(connection_socket).await;
+                    info!("Received ZSCORE command in mode {mode:?}");
+                    match mode {
+                        ClientMode::Normal => {
+                            info!(
+                                "Received ZSCORE command for key: {}, member: {}",
+                                key, member
+                            );
+                            let cache = self.cache.lock().await;
+                            if let Some(entry) = cache.get(key) {
+                                if let Frame::SortedSet(sorted_set) = &entry.value {
+                                    if let Some(score) = sorted_set.score(member) {
+                                        Ok(frame_bytes!(bulk score.to_string()))
+                                    } else {
+                                        Ok(frame_bytes!(null))
+                                    }
+                                } else {
+                                    Err(RespError::WrongType)
+                                }
+                            } else {
+                                Ok(frame_bytes!(null))
+                            }
+                        }
+                        ClientMode::Transaction => {
+                            self.queue_transaction(command, connection_socket).await;
+                            Ok(frame_bytes!("QUEUED"))
+                        }
+                        ClientMode::Subscribe => Ok(
+                            frame_bytes!(error "ERR Can't execute 'zscore': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"),
+                        ),
+                    }
+                }
+                RC::Zcard { ref key } => {
+                    let mode = self.client_mode(connection_socket).await;
+                    info!("Received ZCARD command in mode {mode:?}");
+                    match mode {
+                        ClientMode::Normal => {
+                            info!("Received ZCARD command for key: {}", key);
+                            let cache = self.cache.lock().await;
+                            if let Some(entry) = cache.get(key) {
+                                if let Frame::SortedSet(sorted_set) = &entry.value {
+                                    Ok(frame_bytes!(int sorted_set.len() as i64))
+                                } else {
+                                    Err(RespError::WrongType)
+                                }
+                            } else {
+                                Ok(frame_bytes!(int 0))
+                            }
+                        }
+                        ClientMode::Transaction => {
+                            self.queue_transaction(command, connection_socket).await;
+                            Ok(frame_bytes!("QUEUED"))
+                        }
+                        ClientMode::Subscribe => Ok(
+                            frame_bytes!(error "ERR Can't execute 'zcard': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"),
+                        ),
+                    }
+                }
+                RC::Zrem {
+                    ref key,
+                    ref member,
+                } => {
+                    let mode = self.client_mode(connection_socket).await;
+                    info!("Received ZREM command in mode {mode:?}");
+                    match mode {
+                        ClientMode::Normal => {
+                            info!("Received ZREM command for key: {}, member: {}", key, member);
+                            let mut cache = self.cache.lock().await;
+                            if let Some(entry) = cache.get_mut(key) {
+                                if let Frame::SortedSet(sorted_set) = &mut entry.value {
+                                    let removed = sorted_set.remove(member);
+                                    Ok(frame_bytes!(int if removed { 1 } else { 0 }))
+                                } else {
+                                    Err(RespError::WrongType)
+                                }
+                            } else {
+                                Ok(frame_bytes!(int 0))
+                            }
+                        }
+                        ClientMode::Transaction => {
+                            self.queue_transaction(command, connection_socket).await;
+                            Ok(frame_bytes!("QUEUED"))
+                        }
+                        ClientMode::Subscribe => Ok(
+                            frame_bytes!(error "ERR Can't execute 'zrem': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"),
+                        ),
+                    }
+                }
                 RC::Invalid => {
                     info!("Received INVALID command");
                     Err(RespError::InvalidCommandSyntax)

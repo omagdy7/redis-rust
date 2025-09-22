@@ -1,12 +1,11 @@
 use bytes::Bytes;
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt,
 };
 
 use crate::rdb;
-use crate::stream::*;
 
 /// Wrapper for f64 that implements Ord for use in BTreeMap
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
@@ -17,6 +16,96 @@ impl Eq for OrderedFloat {}
 impl Ord for OrderedFloat {
     fn cmp(&self, other: &Self) -> Ordering {
         self.0.partial_cmp(&other.0).unwrap_or(Ordering::Equal)
+    }
+}
+
+/// Efficient sorted set implementation with fast member lookup
+#[derive(Debug, Clone)]
+pub struct SortedSet {
+    /// Ordered set for ranking: (score, member) - sorted by score then lexicographically by member
+    ordered: BTreeSet<(OrderedFloat, String)>,
+    /// Fast lookup: member -> score
+    member_map: HashMap<String, OrderedFloat>,
+}
+
+impl SortedSet {
+    pub fn new() -> Self {
+        Self {
+            ordered: BTreeSet::new(),
+            member_map: HashMap::new(),
+        }
+    }
+
+    /// Add or update a member with score. Returns true if new member added, false if updated.
+    pub fn insert(&mut self, score: f64, member: String) -> bool {
+        let ordered_score = OrderedFloat(score);
+        let is_new = if let Some(old_score) = self.member_map.get(&member) {
+            // Remove old entry
+            self.ordered.remove(&(old_score.clone(), member.clone()));
+            false
+        } else {
+            true
+        };
+
+        self.ordered.insert((ordered_score, member.clone()));
+        self.member_map.insert(member, ordered_score);
+
+        is_new
+    }
+
+    /// Remove a member. Returns true if removed.
+    pub fn remove(&mut self, member: &str) -> bool {
+        if let Some(score) = self.member_map.remove(member) {
+            self.ordered.remove(&(score, member.to_string()));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get score of a member
+    pub fn score(&self, member: &str) -> Option<f64> {
+        self.member_map.get(member).map(|score| score.0)
+    }
+
+    /// Get rank (0-based index) of a member
+    pub fn rank(&self, member: &str) -> Option<usize> {
+        self.member_map.get(member).map(|score| {
+            self.ordered.range(..(score.clone(), member.to_string())).count()
+        })
+    }
+
+    /// Get cardinality
+    pub fn len(&self) -> usize {
+        self.ordered.len()
+    }
+
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.ordered.is_empty()
+    }
+
+    /// Get members in range [start, end] inclusive, with optional scores
+    pub fn range(&self, start: isize, end: isize, with_scores: bool) -> Vec<Frame> {
+        let len = self.ordered.len() as isize;
+        let mut start_idx = if start < 0 { len + start } else { start };
+        let mut end_idx = if end < 0 { len + end } else { end };
+
+        if start_idx < 0 { start_idx = 0; }
+        if end_idx >= len { end_idx = len - 1; }
+        if start_idx > end_idx { return vec![]; }
+
+        self.ordered.iter()
+            .enumerate()
+            .filter(|(i, _)| *i >= start_idx as usize && *i <= end_idx as usize)
+            .flat_map(|(_, (score, member))| {
+                if with_scores {
+                    vec![Frame::BulkString(Bytes::copy_from_slice(member.as_bytes())), Frame::BulkString(Bytes::copy_from_slice(score.0.to_string().as_bytes()))]
+                } else {
+                    vec![Frame::BulkString(Bytes::copy_from_slice(member.as_bytes()))]
+                }
+            })
+            .collect()
     }
 }
 
@@ -49,14 +138,14 @@ pub enum Frame {
     VerbatimString(Vec<Frame>),
     /// Map (%)
     Map(HashMap<String, Frame>),
-    /// Stream
-    Stream(Vec<StreamEntry>),
-    /// Attribute (|)
-    Attribute(Vec<Frame>),
     /// Set (~)
     Set(HashSet<String>),
-    /// Sorted Set (custom)
-    SortedSet(BTreeMap<OrderedFloat, Vec<String>>),
+    /// Sorted Set (z)
+    SortedSet(SortedSet),
+    /// Stream
+    Stream(Vec<crate::stream::StreamEntry>),
+    /// Attribute (|)
+    Attribute(Vec<Frame>),
     /// Push (>)
     Push(Vec<Frame>),
 
@@ -489,8 +578,10 @@ impl PartialEq for Frame {
             (Frame::BulkError(a), Frame::BulkError(b)) => a == b,
             (Frame::VerbatimString(a), Frame::VerbatimString(b)) => a == b,
             (Frame::Map(a), Frame::Map(b)) => a == b,
+            (Frame::Stream(_), Frame::Stream(_)) => false, // TODO: implement proper comparison
             (Frame::Attribute(a), Frame::Attribute(b)) => a == b,
             (Frame::Set(a), Frame::Set(b)) => a == b,
+            (Frame::SortedSet(a), Frame::SortedSet(b)) => a.ordered == b.ordered, // Simple comparison
             (Frame::Push(a), Frame::Push(b)) => a == b,
             (Frame::RedisString(a), Frame::RedisString(b)) => a == b,
             (Frame::RedisList(a), Frame::RedisList(b)) => a == b,
