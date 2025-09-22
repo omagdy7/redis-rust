@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use regex::Regex;
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{BTreeMap, HashMap, hash_map::Entry},
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     pin::Pin,
@@ -14,16 +14,20 @@ use tokio::{
 };
 use tracing::{error, info};
 
-use crate::shared_cache::{Cache, CacheEntry};
 use crate::stream::{StreamEntry, StreamId, XReadStreamId, XrangeStreamdId};
 use crate::types::*;
 use crate::types::{NotificationManager, NotifierType, PubSubMsg};
 use crate::{
     commands::{ExpiryOption, RedisCommand, SetCondition},
-    transaction::Transaction,
+    error::RespError,
+    frame::Frame,
+    transaction::{Transaction, TxState},
+    types::ClientMode,
 };
-use crate::{error::RespError, transaction};
-use crate::{frame::Frame, transaction::TxState};
+use crate::{
+    frame::OrderedFloat,
+    shared_cache::{Cache, CacheEntry},
+};
 
 #[derive(Clone)]
 pub struct MasterServer {
@@ -305,7 +309,7 @@ impl MasterServer {
         match transaction_guard.entry(connection_socket.clone()) {
             Entry::Occupied(mut entry) => {
                 let transaction = entry.get_mut();
-                if transaction.state() == transaction::TxState::Queuing {
+                if transaction.state() == TxState::Queuing {
                     info!("Transaction map has an entry and it's state is Queuing");
                     info!("Adding command {:?} to queue", command);
                     transaction.queue(command.clone());
@@ -1299,10 +1303,10 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                             // Key does exist meaning MULTI has at least executed once
                             let transaction = entry.get_mut();
                             match transaction.state() {
-                                transaction::TxState::Idle => {
+                                TxState::Idle => {
                                     unreachable!()
                                 }
-                                transaction::TxState::Queuing => {
+                                TxState::Queuing => {
                                     response = Ok(frame_bytes!("OK"));
                                     if !transaction.is_empty_queue() {
                                         transaction.discard();
@@ -1311,7 +1315,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                             .await;
                                     }
                                 }
-                                transaction::TxState::Discarded => {
+                                TxState::Discarded => {
                                     unreachable!("Bruh.. How did I even came here")
                                 }
                             }
@@ -1333,8 +1337,8 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                             // Key does exist meaning MULTI has at least executed once
                             let transaction = entry.get_mut();
                             match transaction.state() {
-                                transaction::TxState::Idle => {}
-                                transaction::TxState::Queuing => {
+                                TxState::Idle => {}
+                                TxState::Queuing => {
                                     if transaction.is_empty_queue() {
                                         info!("State is queuing and commands queue is empty");
                                         response = Ok(frame_bytes!(list => vec![]));
@@ -1378,7 +1382,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                         response = Ok(frame_bytes!(list => flatten_arr))
                                     }
                                 }
-                                transaction::TxState::Discarded => {
+                                TxState::Discarded => {
                                     unreachable!("Bruh... How am I even here!!")
                                 }
                             }
@@ -1673,6 +1677,89 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         ),
                     }
                 }
+                RC::Zadd {
+                    ref key,
+                    score,
+                    ref member,
+                } => {
+                    let mode = self.client_mode(connection_socket).await;
+                    info!("Received ZADD command in mode {mode:?}");
+                    match mode {
+                        ClientMode::Normal => {
+                            info!(
+                                "Received ZADD command for key: {}, score: {}, member: {}",
+                                key, score, member
+                            );
+                            let mut cache = self.cache.lock().await;
+                            info!("Cache lock acquired for ZADD");
+
+                            let entry = cache.entry(key.clone()).or_insert_with(|| CacheEntry {
+                                value: Frame::SortedSet(BTreeMap::new()),
+                                expires_at: None,
+                            });
+
+                            // TODO: Find a way to make this faster this is very inefficient for
+                            // large sorted sets as it's pretty much O(n^2) to get the logic right
+                            match &mut entry.value {
+                                Frame::SortedSet(sorted_set) => {
+                                    let ordered_score = OrderedFloat(score);
+                                    // Check if member already exists
+                                    let was_present =
+                                        sorted_set.values().any(|members| members.contains(member));
+
+                                    // Remove member from any existing score
+                                    for members in sorted_set.values_mut() {
+                                        members.retain(|m| m != member);
+                                    }
+
+                                    // Remove empty score entries
+                                    sorted_set.retain(|_, members| !members.is_empty());
+
+                                    // Add to new score
+                                    sorted_set
+                                        .entry(ordered_score)
+                                        .or_insert_with(Vec::new)
+                                        .push(member.clone());
+
+                                    info!(
+                                        "Added member {} with score {} to sorted set {}",
+                                        member, score, key
+                                    );
+                                    let added_count = if was_present { 0 } else { 1 };
+                                    Ok(frame_bytes!(int added_count)) // Number of elements added
+                                }
+                                _ => Err(RespError::WrongType),
+                            }
+                        }
+                        ClientMode::Transaction => {
+                            self.queue_transaction(command, connection_socket).await;
+                            Ok(frame_bytes!("QUEUED"))
+                        }
+                        ClientMode::Subscribe => Ok(
+                            frame_bytes!(error "ERR Can't execute 'zadd': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"),
+                        ),
+                    }
+                }
+                RC::Zrange {
+                    key: _,
+                    start: _,
+                    end: _,
+                    with_scores: _,
+                } => Err(RespError::Custom(
+                    "ZRANGE command not implemented".to_string(),
+                )),
+                RC::Zrank { key: _, member: _ } => Err(RespError::Custom(
+                    "ZRANK command not implemented".to_string(),
+                )),
+                RC::Zscore { key: _, member: _ } => Err(RespError::Custom(
+                    "ZSCORE command not implemented".to_string(),
+                )),
+                RC::Zcard { key: _ } => Err(RespError::Custom(
+                    "ZCARD command not implemented".to_string(),
+                )),
+                RC::Zrem { key: _, member: _ } => Err(RespError::Custom(
+                    "ZREM command not implemented".to_string(),
+                )),
                 RC::Invalid => {
                     info!("Received INVALID command");
                     Err(RespError::InvalidCommandSyntax)

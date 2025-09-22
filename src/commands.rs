@@ -155,6 +155,33 @@ pub enum RedisCommand {
         key: String,
         time_sec: f64,
     },
+    // Sorted set commands
+    Zadd {
+        key: String,
+        score: f64,
+        member: String,
+    },
+    Zrange {
+        key: String,
+        start: i64,
+        end: i64,
+        with_scores: bool,
+    },
+    Zrank {
+        key: String,
+        member: String,
+    },
+    Zscore {
+        key: String,
+        member: String,
+    },
+    Zcard {
+        key: String,
+    },
+    Zrem {
+        key: String,
+        member: String,
+    },
     // Stream commands
     Xadd {
         key: String,
@@ -647,6 +674,85 @@ impl RedisCommand {
         }
     }
 
+    fn parse_zadd_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        if let Some([key, score_str, member]) = Self::parse_args::<3>(&mut args) {
+            let Ok(score) = score_str.parse::<f64>() else {
+                return Self::Invalid;
+            };
+            Self::Zadd { key, score, member }
+        } else {
+            Self::Invalid
+        }
+    }
+
+    fn parse_zrange_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let key_frame = Self::require_next_arg(&mut args);
+        let start_frame = Self::require_next_arg(&mut args);
+        let end_frame = Self::require_next_arg(&mut args);
+        let (Some(key_frame), Some(start_frame), Some(end_frame)) = (key_frame, start_frame, end_frame) else {
+            return Self::Invalid;
+        };
+        let Some(key) = Self::extract_string(key_frame) else {
+            return Self::Invalid;
+        };
+        let Some(start) = Self::extract_i64(start_frame) else {
+            return Self::Invalid;
+        };
+        let Some(end) = Self::extract_i64(end_frame) else {
+            return Self::Invalid;
+        };
+
+        let mut with_scores = false;
+        if let Some(option_frame) = args.next() {
+            if let Some(option) = Self::extract_string(option_frame) {
+                if option.eq_ignore_ascii_case("WITHSCORES") {
+                    with_scores = true;
+                } else {
+                    return Self::Invalid;
+                }
+            }
+        }
+
+        Self::Zrange {
+            key,
+            start,
+            end,
+            with_scores,
+        }
+    }
+
+    fn parse_zrank_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        if let Some([key, member]) = Self::parse_args::<2>(&mut args) {
+            Self::Zrank { key, member }
+        } else {
+            Self::Invalid
+        }
+    }
+
+    fn parse_zscore_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        if let Some([key, member]) = Self::parse_args::<2>(&mut args) {
+            Self::Zscore { key, member }
+        } else {
+            Self::Invalid
+        }
+    }
+
+    fn parse_zcard_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        if let Some([key]) = Self::parse_args::<1>(&mut args) {
+            Self::Zcard { key }
+        } else {
+            Self::Invalid
+        }
+    }
+
+    fn parse_zrem_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        if let Some([key, member]) = Self::parse_args::<2>(&mut args) {
+            Self::Zrem { key, member }
+        } else {
+            Self::Invalid
+        }
+    }
+
     /// Unified command parser that handles all Redis commands
     fn parse_command<'a>(cmd_name: &str, args: impl Iterator<Item = &'a Frame>) -> Self {
         match cmd_name {
@@ -683,6 +789,13 @@ impl RedisCommand {
             "SUBSCRIBE" => Self::parse_subscribe_command(args),
             "UNSUBSCRIBE" => Self::parse_unsubscribe_command(args),
             "PUBLISH" => Self::parse_publish_command(args),
+            // Sorted set commands
+            "ZADD" => Self::parse_zadd_command(args),
+            "ZRANGE" => Self::parse_zrange_command(args),
+            "ZRANK" => Self::parse_zrank_command(args),
+            "ZSCORE" => Self::parse_zscore_command(args),
+            "ZCARD" => Self::parse_zcard_command(args),
+            "ZREM" => Self::parse_zrem_command(args),
             _ => Self::Invalid,
         }
     }

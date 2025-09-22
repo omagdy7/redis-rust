@@ -1,11 +1,24 @@
 use bytes::Bytes;
 use std::{
-    collections::{HashMap, HashSet},
+    cmp::Ordering,
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
 };
 
 use crate::rdb;
 use crate::stream::*;
+
+/// Wrapper for f64 that implements Ord for use in BTreeMap
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct OrderedFloat(pub f64);
+
+impl Eq for OrderedFloat {}
+
+impl Ord for OrderedFloat {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.partial_cmp(&other.0).unwrap_or(Ordering::Equal)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Frame {
@@ -42,6 +55,8 @@ pub enum Frame {
     Attribute(Vec<Frame>),
     /// Set (~)
     Set(HashSet<String>),
+    /// Sorted Set (custom)
+    SortedSet(BTreeMap<OrderedFloat, Vec<String>>),
     /// Push (>)
     Push(Vec<Frame>),
 
@@ -87,7 +102,6 @@ impl Frame {
             Frame::Double(d) => format!(",{}\r\n", d).into_bytes(),
             Frame::BigNumber(n) => format!("({}\r\n", n).into_bytes(),
             Frame::BulkError(errors) => {
-                // For now, just return the first error as a simple error
                 if let Some(Frame::SimpleError(err)) = errors.first() {
                     format!("-{}\r\n", err).into_bytes()
                 } else {
@@ -95,7 +109,6 @@ impl Frame {
                 }
             }
             Frame::VerbatimString(strings) => {
-                // For now, just return the first string
                 if let Some(Frame::BulkString(bytes)) = strings.first() {
                     let len = bytes.len();
                     let s = String::from_utf8_lossy(bytes.as_ref());
@@ -166,6 +179,7 @@ impl Frame {
                 }
                 result
             }
+            Frame::SortedSet(_) => b"-ERR SortedSet cannot be serialized\r\n".to_vec(),
             Frame::Push(items) => {
                 let len = items.len();
                 let mut result = format!(">{}\r\n", len).into_bytes();
@@ -396,6 +410,7 @@ impl fmt::Display for Frame {
             Frame::Map(map) => write!(f, "Map({} entries)", map.len()),
             Frame::Attribute(attrs) => write!(f, "Attribute({} attrs)", attrs.len()),
             Frame::Set(set) => write!(f, "Set({} items)", set.len()),
+            Frame::SortedSet(sorted_set) => write!(f, "SortedSet({} entries)", sorted_set.len()),
             Frame::Push(items) => write!(f, "Push({} items)", items.len()),
             Frame::RedisString(bytes) => match std::str::from_utf8(bytes.as_ref()) {
                 Ok(s) => write!(f, "{}", s),
