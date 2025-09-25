@@ -38,6 +38,58 @@ fn spread_int32_to_int64(v: u32) -> u64 {
 
     return v as u64;
 }
+fn compact_int64_to_int32(v: u64) -> u32 {
+    // Keep only the bits in even positions
+    let v = v & 0x5555555555555555;
+
+    // Before masking: w1   v1  ...   w2   v16  ... w31  v31  w32  v32
+    // After masking: 0   v1  ...   0   v16  ... 0  v31  0  v32
+
+    // Where w1, w2,..w31 are the digits from longitude if we're compacting latitude, or digits from latitude if we're compacting longitude
+    // So, we mask them out and only keep the relevant bits that we wish to compact
+
+    // ------
+    // Reverse the spreading process by shifting and masking
+    let v = (v | (v >> 1)) & 0x3333333333333333;
+    let v = (v | (v >> 2)) & 0x0F0F0F0F0F0F0F0F;
+    let v = (v | (v >> 4)) & 0x00FF00FF00FF00FF;
+    let v = (v | (v >> 8)) & 0x0000FFFF0000FFFF;
+    let v = (v | (v >> 16)) & 0x00000000FFFFFFFF;
+
+    // Before compacting: 0   v1  ...   0   v16  ... 0  v31  0  v32
+    // After compacting: v1  v2  ...  v31  v32
+    // -----
+
+    return v as u32;
+}
+fn convert_grid_numbers_to_coordinates(
+    grid_latitude_number: u32,
+    grid_longitude_number: u32,
+) -> (f64, f64) {
+    const MIN_LATITUDE: f64 = -85.05112878;
+    const MAX_LATITUDE: f64 = 85.05112878;
+    const MIN_LONGITUDE: f64 = -180.0;
+    const MAX_LONGITUDE: f64 = 180.0;
+
+    const LATITUDE_RANGE: f64 = MAX_LATITUDE - MIN_LATITUDE;
+    const LONGITUDE_RANGE: f64 = MAX_LONGITUDE - MIN_LONGITUDE;
+
+    // Calculate the grid boundaries
+    let grid_latitude_min =
+        MIN_LATITUDE + LATITUDE_RANGE * (grid_latitude_number as f64 / 2_f64.powi(26));
+    let grid_latitude_max =
+        MIN_LATITUDE + LATITUDE_RANGE * ((grid_latitude_number + 1) as f64 / 2_f64.powi(26));
+    let grid_longitude_min =
+        MIN_LONGITUDE + LONGITUDE_RANGE * (grid_longitude_number as f64 / 2_f64.powi(26));
+    let grid_longitude_max =
+        MIN_LONGITUDE + LONGITUDE_RANGE * ((grid_longitude_number + 1) as f64 / 2_f64.powi(26));
+
+    // Calculate the center point of the grid cell
+    let latitude = (grid_latitude_min + grid_latitude_max) / 2_f64;
+    let longitude = (grid_longitude_min + grid_longitude_max) / 2_f64;
+    return (longitude, latitude);
+}
+
 fn interleave(x: u32, y: u32) -> u64 {
     // First, the values are spread from 32-bit to 64-bit integers.
     // This is done by inserting 32 zero bits in-between.
@@ -102,6 +154,24 @@ impl GeoPosition {
         // Interleaving
         let score = interleave(normalized_latitude, normalized_longitude);
         score
+    }
+
+    pub fn decode_score(score: u64) -> (f64, f64) {
+        // Step 1: Separating the Interleaved Bits
+
+        // Extract longitude bits (they were shifted left by 1 during encoding)
+        let y = score >> 1;
+        // Extract latitude bits (they were in the original positions)
+        let x = score;
+
+        // Step 2: Compacting 64-bit integer to 32-bit integers
+
+        // Compact both latitude and longitude back to 32-bit integers
+        let grid_latitude_number = compact_int64_to_int32(x);
+        let grid_longitude_number = compact_int64_to_int32(y);
+
+        // Step 3: Converting Back to Geographic Coordinates
+        convert_grid_numbers_to_coordinates(grid_latitude_number, grid_longitude_number)
     }
 }
 

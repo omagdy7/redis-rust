@@ -1984,9 +1984,13 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
 
                             for location in locations {
                                 if let Frame::SortedSet(sorted_set) = &entry.value {
-                                    if let Some(_score) = sorted_set.score(&location) {
+                                    if let Some(score) = sorted_set.score(&location) {
+                                        let (longitude, latitude) =
+                                            GeoPosition::decode_score(score as u64);
+                                        let (longitude, latitude) =
+                                            (longitude.to_string(), latitude.to_string());
                                         response
-                                            .push(frame!(list => vec![frame!(bulk "0"), frame!(bulk "0")]));
+                                            .push(frame!(list => vec![frame!(bulk longitude), frame!(bulk latitude)]));
                                     } else {
                                         response.push(frame!(null_list));
                                     }
