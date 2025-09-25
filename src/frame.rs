@@ -5,7 +5,7 @@ use std::{
     fmt,
 };
 
-use crate::rdb;
+use crate::{rdb, stream::StreamEntry};
 
 /// Wrapper for f64 that implements Ord for use in BTreeMap
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
@@ -19,16 +19,64 @@ impl Ord for OrderedFloat {
     }
 }
 
-/// Efficient sorted set implementation with fast member lookup
-#[derive(Debug, Clone)]
-pub struct SortedSet {
-    /// Ordered set for ranking: (score, member) - sorted by score then lexicographically by member
-    ordered: BTreeSet<(OrderedFloat, String)>,
-    /// Fast lookup: member -> score
-    member_map: HashMap<String, OrderedFloat>,
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct GeoPosition {
+    longitude: OrderedFloat,
+    latitude: OrderedFloat,
 }
 
-impl SortedSet {
+impl GeoPosition {
+    pub fn new(longitude: f64, latitude: f64) -> Self {
+        Self {
+            longitude: OrderedFloat(longitude),
+            latitude: OrderedFloat(latitude),
+        }
+    }
+}
+
+impl Eq for GeoPosition {}
+
+impl Ord for GeoPosition {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.longitude.cmp(&other.longitude) {
+            Ordering::Equal => self.latitude.cmp(&other.latitude),
+            ord => ord,
+        }
+    }
+}
+
+pub trait ScoreType {
+    fn score_to_string(&self) -> String;
+}
+
+impl ScoreType for OrderedFloat {
+    fn score_to_string(&self) -> String {
+        self.0.to_string()
+    }
+}
+
+impl ScoreType for GeoPosition {
+    fn score_to_string(&self) -> String {
+        format!("{},{}", self.longitude.0, self.latitude.0)
+    }
+}
+
+/// Efficient sorted set implementation with fast member lookup
+#[derive(Debug, Clone)]
+pub struct SortedSet<T>
+where
+    T: Ord + Clone,
+{
+    /// Ordered set for ranking: (score, member) - sorted by score then lexicographically by member
+    ordered: BTreeSet<(T, String)>,
+    /// Fast lookup: member -> score
+    member_map: HashMap<String, T>,
+}
+
+impl<T> SortedSet<T>
+where
+    T: Ord + Clone + std::fmt::Debug + ScoreType,
+{
     pub fn new() -> Self {
         Self {
             ordered: BTreeSet::new(),
@@ -37,8 +85,7 @@ impl SortedSet {
     }
 
     /// Add or update a member with score. Returns true if new member added, false if updated.
-    pub fn insert(&mut self, score: f64, member: String) -> bool {
-        let ordered_score = OrderedFloat(score);
+    pub fn insert(&mut self, score: T, member: String) -> bool {
         let is_new = if let Some(old_score) = self.member_map.get(&member) {
             // Remove old entry
             self.ordered.remove(&(old_score.clone(), member.clone()));
@@ -47,8 +94,8 @@ impl SortedSet {
             true
         };
 
-        self.ordered.insert((ordered_score, member.clone()));
-        self.member_map.insert(member, ordered_score);
+        self.ordered.insert((score.clone(), member.clone()));
+        self.member_map.insert(member, score);
 
         is_new
     }
@@ -64,14 +111,16 @@ impl SortedSet {
     }
 
     /// Get score of a member
-    pub fn score(&self, member: &str) -> Option<f64> {
-        self.member_map.get(member).map(|score| score.0)
+    pub fn score(&self, member: &str) -> Option<&T> {
+        self.member_map.get(member)
     }
 
     /// Get rank (0-based index) of a member
     pub fn rank(&self, member: &str) -> Option<usize> {
         self.member_map.get(member).map(|score| {
-            self.ordered.range(..(score.clone(), member.to_string())).count()
+            self.ordered
+                .range(..(score.clone(), member.to_string()))
+                .count()
         })
     }
 
@@ -91,16 +140,26 @@ impl SortedSet {
         let mut start_idx = if start < 0 { len + start } else { start };
         let mut end_idx = if end < 0 { len + end } else { end };
 
-        if start_idx < 0 { start_idx = 0; }
-        if end_idx >= len { end_idx = len - 1; }
-        if start_idx > end_idx { return vec![]; }
+        if start_idx < 0 {
+            start_idx = 0;
+        }
+        if end_idx >= len {
+            end_idx = len - 1;
+        }
+        if start_idx > end_idx {
+            return vec![];
+        }
 
-        self.ordered.iter()
+        self.ordered
+            .iter()
             .enumerate()
             .filter(|(i, _)| *i >= start_idx as usize && *i <= end_idx as usize)
             .flat_map(|(_, (score, member))| {
                 if with_scores {
-                    vec![Frame::BulkString(Bytes::copy_from_slice(member.as_bytes())), Frame::BulkString(Bytes::copy_from_slice(score.0.to_string().as_bytes()))]
+                    vec![
+                        Frame::BulkString(Bytes::copy_from_slice(member.as_bytes())),
+                        Frame::BulkString(Bytes::copy_from_slice(score.score_to_string().as_bytes())),
+                    ]
                 } else {
                     vec![Frame::BulkString(Bytes::copy_from_slice(member.as_bytes()))]
                 }
@@ -141,9 +200,11 @@ pub enum Frame {
     /// Set (~)
     Set(HashSet<String>),
     /// Sorted Set (z)
-    SortedSet(SortedSet),
+    SortedSet(SortedSet<OrderedFloat>),
+    /// Geo Sorted Set
+    GeoSortedSet(SortedSet<GeoPosition>),
     /// Stream
-    Stream(Vec<crate::stream::StreamEntry>),
+    Stream(Vec<StreamEntry>),
     /// Attribute (|)
     Attribute(Vec<Frame>),
     /// Push (>)
@@ -269,6 +330,7 @@ impl Frame {
                 result
             }
             Frame::SortedSet(_) => b"-ERR SortedSet cannot be serialized\r\n".to_vec(),
+            Frame::GeoSortedSet(_) => b"-ERR GeoSortedSet cannot be serialized\r\n".to_vec(),
             Frame::Push(items) => {
                 let len = items.len();
                 let mut result = format!(">{}\r\n", len).into_bytes();
@@ -499,7 +561,8 @@ impl fmt::Display for Frame {
             Frame::Map(map) => write!(f, "Map({} entries)", map.len()),
             Frame::Attribute(attrs) => write!(f, "Attribute({} attrs)", attrs.len()),
             Frame::Set(set) => write!(f, "Set({} items)", set.len()),
-            Frame::SortedSet(sorted_set) => write!(f, "SortedSet({} entries)", sorted_set.len()),
+            Frame::SortedSet(s) => write!(f, "SortedSet({} entries)", s.len()),
+            Frame::GeoSortedSet(s) => write!(f, "GeoSortedSet({} entries)", s.len()),
             Frame::Push(items) => write!(f, "Push({} items)", items.len()),
             Frame::RedisString(bytes) => match std::str::from_utf8(bytes.as_ref()) {
                 Ok(s) => write!(f, "{}", s),
@@ -581,7 +644,8 @@ impl PartialEq for Frame {
             (Frame::Stream(_), Frame::Stream(_)) => false, // TODO: implement proper comparison
             (Frame::Attribute(a), Frame::Attribute(b)) => a == b,
             (Frame::Set(a), Frame::Set(b)) => a == b,
-            (Frame::SortedSet(a), Frame::SortedSet(b)) => a.ordered == b.ordered, // Simple comparison
+            (Frame::SortedSet(a), Frame::SortedSet(b)) => a.ordered == b.ordered,
+            (Frame::GeoSortedSet(a), Frame::GeoSortedSet(b)) => a.ordered == b.ordered,
             (Frame::Push(a), Frame::Push(b)) => a == b,
             (Frame::RedisString(a), Frame::RedisString(b)) => a == b,
             (Frame::RedisList(a), Frame::RedisList(b)) => a == b,

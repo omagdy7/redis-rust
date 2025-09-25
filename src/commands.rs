@@ -182,6 +182,13 @@ pub enum RedisCommand {
         key: String,
         member: String,
     },
+    // Sorted set commands
+    Geoadd {
+        key: String,
+        longitude: f64,
+        latitude: f64,
+        member: String,
+    },
     // Stream commands
     Xadd {
         key: String,
@@ -249,7 +256,9 @@ impl RedisCommand {
     }
 
     /// Helper function to parse N string arguments
-    fn parse_args<'a, const N: usize>(args: &mut impl Iterator<Item = &'a Frame>) -> Option<[String; N]> {
+    fn parse_args<'a, const N: usize>(
+        args: &mut impl Iterator<Item = &'a Frame>,
+    ) -> Option<[String; N]> {
         let mut result = [(); N].map(|_| None::<String>);
         for i in 0..N {
             let frame = Self::require_next_arg(args)?;
@@ -759,6 +768,25 @@ impl RedisCommand {
         }
     }
 
+    fn parse_geoadd_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        if let Some([key, longitude, latitude, member]) = Self::parse_args::<4>(&mut args) {
+            let Ok(longitude) = longitude.parse::<f64>() else {
+                return Self::Invalid;
+            };
+            let Ok(latitude) = latitude.parse::<f64>() else {
+                return Self::Invalid;
+            };
+            Self::Geoadd {
+                key,
+                longitude,
+                latitude,
+                member,
+            }
+        } else {
+            Self::Invalid
+        }
+    }
+
     /// Unified command parser that handles all Redis commands
     fn parse_command<'a>(cmd_name: &str, args: impl Iterator<Item = &'a Frame>) -> Self {
         match cmd_name {
@@ -802,6 +830,8 @@ impl RedisCommand {
             "ZSCORE" => Self::parse_zscore_command(args),
             "ZCARD" => Self::parse_zcard_command(args),
             "ZREM" => Self::parse_zrem_command(args),
+            // Geospatial commands
+            "GEOADD" => Self::parse_geoadd_command(args),
             _ => Self::Invalid,
         }
     }

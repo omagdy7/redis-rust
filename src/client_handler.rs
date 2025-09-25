@@ -3,7 +3,6 @@ use std::{collections::HashMap, net::SocketAddr};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ReadHalf},
     net::TcpStream,
-    sync::mpsc,
     time::{Duration, timeout},
 };
 use tracing::{error, info};
@@ -15,8 +14,8 @@ use crate::server::RedisServer;
 use crate::shared_cache::Cache;
 use crate::stream::{StreamEntry, StreamId};
 use crate::types::{
-    BlockedClient, BlockingQueue, BoxedAsyncWrite, NotificationManager, NotifierType,
-    PubSubMsg, ReplicationMsg, ServerState, SharedMut, resolve_stream_id,
+    BlockedClient, BlockingQueue, BoxedAsyncWrite, NotificationManager, NotifierType, PubSubMsg,
+    ReplicationMsg, ServerState, SharedMut, resolve_stream_id,
 };
 use crate::{commands::RedisCommand, stream::XaddStreamId};
 use bytes::Bytes;

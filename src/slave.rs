@@ -510,6 +510,12 @@ impl<W: AsyncWrite + Send + Unpin + 'static> CommandHandler<W> for SlaveServer {
                 }
                 RC::Psync(_) => Ok(RespError::OperationNotSupported.to_resp()),
                 RC::Wait(_) => Ok(frame_bytes!(error "ERR WAIT cannot be used with replica.")),
+                RC::Geoadd {
+                    key: _,
+                    longitude: _,
+                    latitude: _,
+                    member: _,
+                } => todo!(),
                 RC::Invalid => Ok(RespError::InvalidCommandSyntax.to_resp()),
             }
         })
