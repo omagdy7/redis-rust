@@ -299,6 +299,37 @@ impl SortedSet {
             })
             .collect()
     }
+
+    /// Search for members within radius from center point
+    pub fn geo_search(
+        &self,
+        center_lon: f64,
+        center_lat: f64,
+        radius: f64,
+        unit: &str,
+    ) -> Vec<String> {
+        let center = GeoPosition::new(center_lon, center_lat);
+        let radius_m = match unit {
+            "m" => radius,
+            "km" => radius * 1000.0,
+            "ft" => radius * 0.3048,
+            "mi" => radius * 1609.344,
+            _ => radius, // default m
+        };
+        self.member_map
+            .iter()
+            .filter_map(|(member, score)| {
+                let (lon, lat) = GeoPosition::decode_score(score.0 as u64);
+                let pos = GeoPosition::new(lon, lat);
+                let dist = center.dist(pos);
+                if dist <= radius_m {
+                    Some(member.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]

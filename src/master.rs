@@ -14,6 +14,7 @@ use tokio::{
 };
 use tracing::{error, info};
 
+use crate::shared_cache::{Cache, CacheEntry};
 use crate::types::*;
 use crate::types::{NotificationManager, NotifierType, PubSubMsg};
 use crate::{
@@ -26,10 +27,6 @@ use crate::{
 use crate::{
     frame::GeoPosition,
     stream::{StreamEntry, StreamId, XReadStreamId, XrangeStreamdId},
-};
-use crate::{
-    frame::Score,
-    shared_cache::{Cache, CacheEntry},
 };
 
 #[derive(Clone)]
@@ -1905,7 +1902,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         ),
                     }
                 }
-                RC::Geoadd {
+                RC::GeoAdd {
                     ref key,
                     longitude,
                     latitude,
@@ -1938,8 +1935,10 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                     let added = sorted_set
                                         .insert(position.calculate_score() as f64, member.clone());
                                     info!(
-                                        "Added member {} with score 0 to sorted set {}",
-                                        member, key
+                                        "Added member {} with score {} to sorted set {}",
+                                        member,
+                                        position.calculate_score(),
+                                        key
                                     );
                                     let added_count = if added { 1 } else { 0 };
                                     Ok(frame_bytes!(int added_count)) // Number of elements added
@@ -1957,12 +1956,12 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                     }
                 }
 
-                RC::Geopos { .. } => {
+                RC::GeoPos { .. } => {
                     let mode = self.client_mode(connection_socket).await;
                     info!("Received GEOPOS command in mode {mode:?}");
                     match mode {
                         ClientMode::Normal => {
-                            let RC::Geopos { key, locations } = command else {
+                            let RC::GeoPos { key, locations } = command else {
                                 unreachable!()
                             };
                             info!(
@@ -2007,12 +2006,12 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         ),
                     }
                 }
-                RC::Geodist { .. } => {
+                RC::GeoDist { .. } => {
                     let mode = self.client_mode(connection_socket).await;
                     info!("Received GEODIST command in mode {mode:?}");
                     match mode {
                         ClientMode::Normal => {
-                            let RC::Geodist {
+                            let RC::GeoDist {
                                 key,
                                 origin,
                                 destination,
@@ -2059,6 +2058,47 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         }
                         ClientMode::Subscribe => Ok(
                             frame_bytes!(error "ERR Can't execute 'geoadd': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"),
+                        ),
+                    }
+                }
+                RC::GeoSearch {
+                    ref key,
+                    longitude,
+                    latitude,
+                    radius,
+                    ref unit,
+                } => {
+                    let mode = self.client_mode(connection_socket).await;
+                    info!("Received GEOSEARCH command in mode {mode:?}");
+                    match mode {
+                        ClientMode::Normal => {
+                            info!(
+                                "Received GEOSEARCH command for key: {}, lon: {}, lat: {}, radius: {} {}",
+                                key, longitude, latitude, radius, unit
+                            );
+                            let cache = self.cache.lock().await;
+                            info!("Cache lock acquired for GEOSEARCH");
+
+                            if let Some(entry) = cache.get(key) {
+                                if let Frame::SortedSet(sorted_set) = &entry.value {
+                                    let members =
+                                        sorted_set.geo_search(longitude, latitude, radius, unit);
+                                    let response: Vec<Frame> =
+                                        members.into_iter().map(|m| frame!(bulk m)).collect();
+                                    Ok(frame_bytes!(list => response))
+                                } else {
+                                    Err(RespError::WrongType)
+                                }
+                            } else {
+                                Ok(frame_bytes!(list => vec![]))
+                            }
+                        }
+                        ClientMode::Transaction => {
+                            self.queue_transaction(command, connection_socket).await;
+                            Ok(frame_bytes!("QUEUED"))
+                        }
+                        ClientMode::Subscribe => Ok(
+                            frame_bytes!(error "ERR Can't execute 'geosearch': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"),
                         ),
                     }
                 }

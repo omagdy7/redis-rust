@@ -182,21 +182,28 @@ pub enum RedisCommand {
         key: String,
         member: String,
     },
-    // Sorted set commands
-    Geoadd {
+    // Geo Spatial commands
+    GeoAdd {
         key: String,
         longitude: f64,
         latitude: f64,
         member: String,
     },
-    Geopos {
+    GeoPos {
         key: String,
         locations: Vec<String>,
     },
-    Geodist {
+    GeoDist {
         key: String,
         origin: String,
         destination: String,
+    },
+    GeoSearch {
+        key: String,
+        longitude: f64,
+        latitude: f64,
+        radius: f64,
+        unit: String,
     },
     // Stream commands
     Xadd {
@@ -785,7 +792,7 @@ impl RedisCommand {
             let Ok(latitude) = latitude.parse::<f64>() else {
                 return Self::Invalid;
             };
-            Self::Geoadd {
+            Self::GeoAdd {
                 key,
                 longitude,
                 latitude,
@@ -798,10 +805,37 @@ impl RedisCommand {
 
     fn parse_geodist_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
         if let Some([key, origin, destination]) = Self::parse_args::<3>(&mut args) {
-            Self::Geodist {
+            Self::GeoDist {
                 key,
                 origin,
                 destination,
+            }
+        } else {
+            Self::Invalid
+        }
+    }
+
+    fn parse_geosearch_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        if let Some([key, fromlonlat, lon, lat, byradius, radius, unit]) = Self::parse_args::<7>(&mut args) {
+            if fromlonlat == "FROMLONLAT" && byradius == "BYRADIUS" {
+                let Some(longitude) = lon.parse::<f64>().ok() else {
+                    return Self::Invalid;
+                };
+                let Some(latitude) = lat.parse::<f64>().ok() else {
+                    return Self::Invalid;
+                };
+                let Some(radius_val) = radius.parse::<f64>().ok() else {
+                    return Self::Invalid;
+                };
+                Self::GeoSearch {
+                    key,
+                    longitude,
+                    latitude,
+                    radius: radius_val,
+                    unit,
+                }
+            } else {
+                Self::Invalid
             }
         } else {
             Self::Invalid
@@ -825,7 +859,7 @@ impl RedisCommand {
             };
         }
 
-        Self::Geopos {
+        Self::GeoPos {
             key,
             locations: locations,
         }
@@ -878,6 +912,7 @@ impl RedisCommand {
             "GEOADD" => Self::parse_geoadd_command(args),
             "GEOPOS" => Self::parse_geopos_command(args),
             "GEODIST" => Self::parse_geodist_command(args),
+            "GEOSEARCH" => Self::parse_geosearch_command(args),
             _ => Self::Invalid,
         }
     }
