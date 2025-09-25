@@ -19,7 +19,7 @@ use crate::types::{NotificationManager, NotifierType, PubSubMsg};
 use crate::{
     commands::{ExpiryOption, RedisCommand, SetCondition},
     error::RespError,
-    frame::{Frame, ScoreType, SortedSet},
+    frame::{Frame, SortedSet},
     transaction::{Transaction, TxState},
     types::ClientMode,
 };
@@ -28,7 +28,7 @@ use crate::{
     stream::{StreamEntry, StreamId, XReadStreamId, XrangeStreamdId},
 };
 use crate::{
-    frame::OrderedFloat,
+    frame::Score,
     shared_cache::{Cache, CacheEntry},
 };
 
@@ -1696,23 +1696,23 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                             let mut cache = self.cache.lock().await;
                             info!("Cache lock acquired for ZADD");
 
-                             let entry = cache.entry(key.clone()).or_insert_with(|| CacheEntry {
-                                 value: Frame::SortedSet(SortedSet::<OrderedFloat>::new()),
-                                 expires_at: None,
-                             });
+                            let entry = cache.entry(key.clone()).or_insert_with(|| CacheEntry {
+                                value: Frame::SortedSet(SortedSet::new()),
+                                expires_at: None,
+                            });
 
-                             match &mut entry.value {
-                                 Frame::SortedSet(sorted_set) => {
-                                     let added = sorted_set.insert(OrderedFloat(score), member.clone());
-                                     info!(
-                                         "Added member {} with score {} to sorted set {}",
-                                         member, score, key
-                                     );
-                                     let added_count = if added { 1 } else { 0 };
-                                     Ok(frame_bytes!(int added_count)) // Number of elements added
-                                 }
-                                 _ => Err(RespError::WrongType),
-                             }
+                            match &mut entry.value {
+                                Frame::SortedSet(sorted_set) => {
+                                    let added = sorted_set.insert(score, member.clone());
+                                    info!(
+                                        "Added member {} with score {} to sorted set {}",
+                                        member, score, key
+                                    );
+                                    let added_count = if added { 1 } else { 0 };
+                                    Ok(frame_bytes!(int added_count)) // Number of elements added
+                                }
+                                _ => Err(RespError::WrongType),
+                            }
                         }
                         ClientMode::Transaction => {
                             self.queue_transaction(command, connection_socket).await;
@@ -1829,7 +1829,7 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                             if let Some(entry) = cache.get(key) {
                                 if let Frame::SortedSet(sorted_set) = &entry.value {
                                     if let Some(score) = sorted_set.score(member) {
-                                        Ok(frame_bytes!(bulk score.score_to_string()))
+                                        Ok(frame_bytes!(bulk score.to_string()))
                                     } else {
                                         Ok(frame_bytes!(null))
                                     }
@@ -1919,23 +1919,26 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                 "Received GEOADD command for key: {}, longitude {} and latitude {}, member: {}",
                                 key, longitude, latitude, member
                             );
+                            let position = GeoPosition::new(longitude, latitude);
+                            if !position.validate() {
+                                return Ok(
+                                    frame_bytes!(error format!("ERR invalid longitude,latitude pair {longitude}, {latitude}")),
+                                );
+                            }
                             let mut cache = self.cache.lock().await;
                             info!("Cache lock acquired for GEOADD");
 
                             let entry = cache.entry(key.clone()).or_insert_with(|| CacheEntry {
-                                value: Frame::GeoSortedSet(SortedSet::<GeoPosition>::new()),
+                                value: Frame::SortedSet(SortedSet::new()),
                                 expires_at: None,
                             });
 
                             match &mut entry.value {
-                                Frame::GeoSortedSet(sorted_set) => {
-                                    let added = sorted_set.insert(
-                                        GeoPosition::new(longitude, latitude),
-                                        member.clone(),
-                                    );
+                                Frame::SortedSet(sorted_set) => {
+                                    let added = sorted_set.insert(0.0, member.clone());
                                     info!(
-                                        "Added member {} with longitude {} and latitude {} to sorted set {}",
-                                        member, longitude, latitude, key
+                                        "Added member {} with score 0 to sorted set {}",
+                                        member, key
                                     );
                                     let added_count = if added { 1 } else { 0 };
                                     Ok(frame_bytes!(int added_count)) // Number of elements added
