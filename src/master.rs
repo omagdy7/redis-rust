@@ -1973,7 +1973,9 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                             info!("Cache lock acquired for GEOPOS");
 
                             if let None = cache.get(&key) {
-                                return Ok(frame_bytes!(list => vec![frame!(null_list)]));
+                                return Ok(
+                                    frame_bytes!(list => vec![frame!(null_list); locations.len()]),
+                                );
                             }
 
                             let entry = cache.get(&key).unwrap();
