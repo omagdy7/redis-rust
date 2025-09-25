@@ -1935,7 +1935,8 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
 
                             match &mut entry.value {
                                 Frame::SortedSet(sorted_set) => {
-                                    let added = sorted_set.insert(0.0, member.clone());
+                                    let added = sorted_set
+                                        .insert(position.calculate_score() as f64, member.clone());
                                     info!(
                                         "Added member {} with score 0 to sorted set {}",
                                         member, key
@@ -1945,6 +1946,53 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                                 }
                                 _ => Err(RespError::WrongType),
                             }
+                        }
+                        ClientMode::Transaction => {
+                            self.queue_transaction(command, connection_socket).await;
+                            Ok(frame_bytes!("QUEUED"))
+                        }
+                        ClientMode::Subscribe => Ok(
+                            frame_bytes!(error "ERR Can't execute 'geoadd': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"),
+                        ),
+                    }
+                }
+
+                RC::Geopos { .. } => {
+                    let mode = self.client_mode(connection_socket).await;
+                    info!("Received GEOPOS command in mode {mode:?}");
+                    match mode {
+                        ClientMode::Normal => {
+                            let RC::Geopos { key, locations } = command else {
+                                unreachable!()
+                            };
+                            info!(
+                                "Received GEOPOS command for key: {}, locations: {:?}",
+                                key, locations
+                            );
+                            let cache = self.cache.lock().await;
+                            info!("Cache lock acquired for GEOPOS");
+
+                            if let None = cache.get(&key) {
+                                return Ok(frame_bytes!(null_list));
+                            }
+
+                            let entry = cache.get(&key).unwrap();
+
+                            let mut response = vec![];
+
+                            for location in locations {
+                                if let Frame::SortedSet(sorted_set) = &entry.value {
+                                    if let Some(_score) = sorted_set.score(&location) {
+                                        response
+                                            .push(frame!(list => vec![frame!(bulk "0"), frame!(bulk "0")]));
+                                    } else {
+                                        response.push(frame!(null_list));
+                                    }
+                                }
+                                response
+                                    .push(frame!(list => vec![frame!(bulk "0"), frame!(bulk "0")]));
+                            }
+                            Ok(frame_bytes!(list => response))
                         }
                         ClientMode::Transaction => {
                             self.queue_transaction(command, connection_socket).await;

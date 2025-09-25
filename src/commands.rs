@@ -189,6 +189,10 @@ pub enum RedisCommand {
         latitude: f64,
         member: String,
     },
+    Geopos {
+        key: String,
+        locations: Vec<String>,
+    },
     // Stream commands
     Xadd {
         key: String,
@@ -787,6 +791,29 @@ impl RedisCommand {
         }
     }
 
+    fn parse_geopos_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        let key = Self::require_next_arg(&mut args);
+        let Some(op1_frame) = key else {
+            return Self::Invalid;
+        };
+        let Some(key) = Self::extract_string(op1_frame) else {
+            return Self::Invalid;
+        };
+
+        let mut locations = Vec::new();
+
+        while let Some(location) = Self::require_next_arg(&mut args) {
+            if let Some(location) = Self::extract_string(location) {
+                locations.push(location);
+            };
+        }
+
+        Self::Geopos {
+            key,
+            locations: locations,
+        }
+    }
+
     /// Unified command parser that handles all Redis commands
     fn parse_command<'a>(cmd_name: &str, args: impl Iterator<Item = &'a Frame>) -> Self {
         match cmd_name {
@@ -832,6 +859,7 @@ impl RedisCommand {
             "ZREM" => Self::parse_zrem_command(args),
             // Geospatial commands
             "GEOADD" => Self::parse_geoadd_command(args),
+            "GEOPOS" => Self::parse_geopos_command(args),
             _ => Self::Invalid,
         }
     }

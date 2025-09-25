@@ -25,6 +25,41 @@ pub struct GeoPosition {
     latitude: Score,
 }
 
+fn spread_int32_to_int64(v: u32) -> u64 {
+    // Ensure only lower 32 bits are non-zero.
+    let v: u64 = v as u64 & 0xFFFFFFFF;
+
+    // Bitwise operations to spread 32 bits into 64 bits with zeros in-between
+    let v = (v | (v << 16)) & 0x0000FFFF0000FFFF;
+    let v = (v | (v << 8)) & 0x00FF00FF00FF00FF;
+    let v = (v | (v << 4)) & 0x0F0F0F0F0F0F0F0F;
+    let v = (v | (v << 2)) & 0x3333333333333333;
+    let v = (v | (v << 1)) & 0x5555555555555555;
+
+    return v as u64;
+}
+fn interleave(x: u32, y: u32) -> u64 {
+    // First, the values are spread from 32-bit to 64-bit integers.
+    // This is done by inserting 32 zero bits in-between.
+    //
+    // Before spread: x1  x2  ...  x31  x32
+    // After spread:  0   x1  ...   0   x16  ... 0  x31  0  x32
+    let x = spread_int32_to_int64(x);
+    let y = spread_int32_to_int64(y);
+
+    // The y value is then shifted 1 bit to the left.
+    // Before shift: 0   y1   0   y2 ... 0   y31   0   y32
+    // After shift:  y1   0   y2 ... 0   y31   0   y32   0
+    let y_shifted = y << 1;
+
+    // Next, x and y_shifted are combined using a bitwise OR.
+    //
+    // Before bitwise OR (x): 0   x1   0   x2   ...  0   x31    0   x32
+    // Before bitwise OR (y): y1  0    y2  0    ...  y31  0    y32   0
+    // After bitwise OR     : y1  x2   y2  x2   ...  y31  x31  y32  x32
+    return x | y_shifted;
+}
+
 impl GeoPosition {
     pub fn new(longitude: f64, latitude: f64) -> Self {
         Self {
@@ -34,14 +69,39 @@ impl GeoPosition {
     }
 
     pub fn validate(&self) -> bool {
-        self.longitude >= Score(-180.0)
-            && self.longitude <= Score(180.0)
-            && self.latitude >= Score(-85.05112878)
-            && self.latitude <= Score(85.05112878)
+        const MIN_LATITUDE: f64 = -85.05112878;
+        const MAX_LATITUDE: f64 = 85.05112878;
+        const MIN_LONGITUDE: f64 = -180.0;
+        const MAX_LONGITUDE: f64 = 180.0;
+
+        self.longitude >= Score(MIN_LONGITUDE)
+            && self.longitude <= Score(MAX_LONGITUDE)
+            && self.latitude >= Score(MIN_LATITUDE)
+            && self.latitude <= Score(MAX_LATITUDE)
     }
 
-    pub fn calculate_score(&self) -> Score {
-        todo!()
+    pub fn calculate_score(&self) -> u64 {
+        // Normalization
+        const MIN_LATITUDE: f64 = -85.05112878;
+        const MAX_LATITUDE: f64 = 85.05112878;
+        const MIN_LONGITUDE: f64 = -180.0;
+        const MAX_LONGITUDE: f64 = 180.0;
+
+        const LATITUDE_RANGE: f64 = MAX_LATITUDE - MIN_LATITUDE;
+        const LONGITUDE_RANGE: f64 = MAX_LONGITUDE - MIN_LONGITUDE;
+
+        let normalized_latitude =
+            2_f64.powi(26) * (self.latitude.0 - MIN_LATITUDE) / LATITUDE_RANGE;
+        let normalized_longitude =
+            2_f64.powi(26) * (self.longitude.0 - MIN_LONGITUDE) / LONGITUDE_RANGE;
+
+        // Truncation
+        let normalized_latitude = normalized_latitude as u32;
+        let normalized_longitude = normalized_longitude as u32;
+
+        // Interleaving
+        let score = interleave(normalized_latitude, normalized_longitude);
+        score
     }
 }
 
