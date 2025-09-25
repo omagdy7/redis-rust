@@ -193,6 +193,11 @@ pub enum RedisCommand {
         key: String,
         locations: Vec<String>,
     },
+    Geodist {
+        key: String,
+        origin: String,
+        destination: String,
+    },
     // Stream commands
     Xadd {
         key: String,
@@ -791,6 +796,18 @@ impl RedisCommand {
         }
     }
 
+    fn parse_geodist_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
+        if let Some([key, origin, destination]) = Self::parse_args::<3>(&mut args) {
+            Self::Geodist {
+                key,
+                origin,
+                destination,
+            }
+        } else {
+            Self::Invalid
+        }
+    }
+
     fn parse_geopos_command<'a>(mut args: impl Iterator<Item = &'a Frame>) -> Self {
         let key = Self::require_next_arg(&mut args);
         let Some(op1_frame) = key else {
@@ -860,6 +877,7 @@ impl RedisCommand {
             // Geospatial commands
             "GEOADD" => Self::parse_geoadd_command(args),
             "GEOPOS" => Self::parse_geopos_command(args),
+            "GEODIST" => Self::parse_geodist_command(args),
             _ => Self::Invalid,
         }
     }

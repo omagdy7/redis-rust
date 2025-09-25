@@ -173,6 +173,19 @@ impl GeoPosition {
         // Step 3: Converting Back to Geographic Coordinates
         convert_grid_numbers_to_coordinates(grid_latitude_number, grid_longitude_number)
     }
+
+    pub fn dist(&self, destination: GeoPosition) -> f64 {
+        const R: f64 = 6372797.560856;
+
+        let lat1 = self.latitude.0.to_radians();
+        let lat2 = destination.latitude.0.to_radians();
+        let d_lat = lat2 - lat1;
+        let d_lon = (destination.longitude.0 - self.longitude.0).to_radians();
+
+        let a = (d_lat / 2.0).sin().powi(2) + (d_lon / 2.0).sin().powi(2) * lat1.cos() * lat2.cos();
+        let c = 2.0 * a.sqrt().asin();
+        R * c
+    }
 }
 
 impl Eq for GeoPosition {}

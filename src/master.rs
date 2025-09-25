@@ -2007,6 +2007,61 @@ impl CommandHandler<BoxedAsyncWrite> for MasterServer {
                         ),
                     }
                 }
+                RC::Geodist { .. } => {
+                    let mode = self.client_mode(connection_socket).await;
+                    info!("Received GEODIST command in mode {mode:?}");
+                    match mode {
+                        ClientMode::Normal => {
+                            let RC::Geodist {
+                                key,
+                                origin,
+                                destination,
+                            } = command
+                            else {
+                                unreachable!()
+                            };
+                            info!(
+                                "Received GEODIST command for key: {}, origin: {}, destination: {}",
+                                key, origin, destination
+                            );
+                            let cache = self.cache.lock().await;
+                            info!("Cache lock acquired for GEODIST");
+
+                            if let None = cache.get(&key) {
+                                return Ok(frame_bytes!(null));
+                            }
+
+                            let entry = cache.get(&key).unwrap();
+
+                            if let Frame::SortedSet(sorted_set) = &entry.value {
+                                if let (Some(score_org), Some(score_dest)) =
+                                    (sorted_set.score(&origin), sorted_set.score(&destination))
+                                {
+                                    let (longitude, latitude) =
+                                        GeoPosition::decode_score(score_org as u64);
+                                    let org = GeoPosition::new(longitude, latitude);
+
+                                    let (longitude, latitude) =
+                                        GeoPosition::decode_score(score_dest as u64);
+                                    let dest = GeoPosition::new(longitude, latitude);
+
+                                    let distance = org.dist(dest).to_string();
+                                    return Ok(frame_bytes!(bulk distance));
+                                } else {
+                                    return Ok(frame_bytes!(null));
+                                }
+                            }
+                            Ok(frame_bytes!(null))
+                        }
+                        ClientMode::Transaction => {
+                            self.queue_transaction(command, connection_socket).await;
+                            Ok(frame_bytes!("QUEUED"))
+                        }
+                        ClientMode::Subscribe => Ok(
+                            frame_bytes!(error "ERR Can't execute 'geoadd': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"),
+                        ),
+                    }
+                }
                 RC::Invalid => {
                     info!("Received INVALID command");
                     Err(RespError::InvalidCommandSyntax)
