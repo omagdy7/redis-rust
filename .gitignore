@@ -10,4 +10,3 @@ target/
 *.pdb
 
 .env
-AGENTS.md
