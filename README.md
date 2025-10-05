@@ -74,5 +74,3 @@ The server implements a wide range of Redis commands across several categories:
     -   A **Pub/Sub Task** listens on a channel for `PubSubMsg`s and broadcasts messages to all clients subscribed to a given channel.
     -   A **Cleanup Task** runs on a timer (`tokio::time::interval`) to periodically scan and remove expired keys.
     This design isolates concerns and prevents any single part of the system from blocking others.
-
--   **Centralized Notification for Blocking Commands:** A `NotificationManager` provides a unified system for handling blocking operations. Instead of ad-hoc signaling, tasks waiting on `BLPOP`, `XREAD`, or `WAIT` can asynchronously wait on a `tokio::sync::Notify` object. When a relevant event occurs (e.g., an `LPUSH` or an `ACK` from a replica), the corresponding notifier is triggered, waking up only the relevant waiting tasks. This is a highly efficient, scalable approach to managing blocking semantics.
